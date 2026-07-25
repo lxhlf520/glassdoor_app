@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.uv/
+
+# IDE
+.vscode/
+.idea/
+
+# Chrome profiles (huge)
+chrome-data/
+chrome_profile/
+chrome-clean/
+
+# APK (large binaries)
+apk/
+
+# Databases
+*.db
+*.db-journal
+
+# Logs
+*.log
+logs/
+
+# Sensitive / runtime
+cookies.json
+*_jwt.txt
+.env
+.env.local
+
+# Test artifacts
+samples/
+screenshots/
+data/
+*.network-response
+
+# Large debug dumps
+_403_page.html
+_node_glassdoor.json
+
+# Proxy raw list (sensitive, use _alive_nodes.json instead)
+_nodes.json
+
+# Binary tools
+*.xz
+*.exe
+*.jar
+tools/frida-server-*
+
+# Capture dumps
+*.mitm
+
+# OS
+.DS_Store
+Thumbs.db

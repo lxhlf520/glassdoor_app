@@ -1,0 +1,17 @@
+{
+  "operationName": "SearchCompanies",
+  "variables": {
+    "employerSearchInput": {
+      "employerName": "Apple Inc.",
+      "numPerPage": 10,
+      "pageRequested": 1
+    }
+  },
+  "query": "query SearchCompanies($employerSearchInput: EmployerSearchInput) { employerSearchRG(employerSearchInput: $employerSearchInput) { __typename ...CompaniesSearchResultFragment } }  fragment EmployerResultFragment on UgcSearchV3EmployerResult { employer { id shortName squareLogoUrl(size: REGULAR) counts { salaryCount reviewCount globalJobCount { jobCount } } } employerRatings { overallRating } }  fragment CompaniesSearchResultFragment on UgcSearchV3EmployerResultWrapper { employerResults { __typename ...EmployerResultFragment } numOfPagesAvailable pageNumber }",
+  "extensions": {
+    "clientLibrary": {
+      "name": "apollo-kotlin",
+      "version": "4.4.3"
+    }
+  }
+}

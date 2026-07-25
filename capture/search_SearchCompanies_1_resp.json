@@ -1,0 +1,191 @@
+{
+  "data": {
+    "employerSearchRG": {
+      "__typename": "UgcSearchV3EmployerResultWrapper",
+      "employerResults": [
+        {
+          "__typename": "UgcSearchV3EmployerResult",
+          "employer": {
+            "counts": {
+              "globalJobCount": {
+                "jobCount": 6273
+              },
+              "reviewCount": 52874,
+              "salaryCount": 177238
+            },
+            "id": 1138,
+            "shortName": "Apple",
+            "squareLogoUrl": "https://media.glassdoor.com/sql/1138/apple-squarelogo-1595530154096.png"
+          },
+          "employerRatings": {
+            "overallRating": 4.1
+          }
+        },
+        {
+          "__typename": "UgcSearchV3EmployerResult",
+          "employer": {
+            "counts": {
+              "globalJobCount": {
+                "jobCount": 22
+              },
+              "reviewCount": 0,
+              "salaryCount": 0
+            },
+            "id": 11129418,
+            "shortName": "Apple",
+            "squareLogoUrl": null
+          },
+          "employerRatings": {
+            "overallRating": -0.10000000149011612
+          }
+        },
+        {
+          "__typename": "UgcSearchV3EmployerResult",
+          "employer": {
+            "counts": {
+              "globalJobCount": {
+                "jobCount": 0
+              },
+              "reviewCount": 107,
+              "salaryCount": 123
+            },
+            "id": 703471,
+            "shortName": "A is for Apple",
+            "squareLogoUrl": "https://media.glassdoor.com/sql/703471/a-is-for-apple-squareLogo-1650647286552.png"
+          },
+          "employerRatings": {
+            "overallRating": 3.0
+          }
+        },
+        {
+          "__typename": "UgcSearchV3EmployerResult",
+          "employer": {
+            "counts": {
+              "globalJobCount": {
+                "jobCount": 0
+              },
+              "reviewCount": 1,
+              "salaryCount": 8
+            },
+            "id": 2837478,
+            "shortName": "Apple IT",
+            "squareLogoUrl": "https://media.glassdoor.com/sql/2837478/apple-it-squarelogo-1670490862596.png"
+          },
+          "employerRatings": {
+            "overallRating": 3.0
+          }
+        },
+        {
+          "__typename": "UgcSearchV3EmployerResult",
+          "employer": {
+            "counts": {
+              "globalJobCount": {
+                "jobCount": 0
+              },
+              "reviewCount": 5,
+              "salaryCount": 6
+            },
+            "id": 2834736,
+            "shortName": "By Apple",
+            "squareLogoUrl": "https://media.glassdoor.com/sql/2834736/by-apple-squarelogo-1670566483188.png"
+          },
+          "employerRatings": {
+            "overallRating": 3.1
+          }
+        },
+        {
+          "__typename": "UgcSearchV3EmployerResult",
+          "employer": {
+            "counts": {
+              "globalJobCount": {
+                "jobCount": 76
+              },
+              "reviewCount": 11,
+              "salaryCount": 16
+            },
+            "id": 986905,
+            "shortName": "Appel",
+            "squareLogoUrl": "https://media.glassdoor.com/sql/986905/appel-squarelogo-1469176646716.png"
+          },
+          "employerRatings": {
+            "overallRating": 4.3
+          }
+        },
+        {
+          "__typename": "UgcSearchV3EmployerResult",
+          "employer": {
+            "counts": {
+              "globalJobCount": {
+                "jobCount": 0
+              },
+              "reviewCount": 2,
+              "salaryCount": 4
+            },
+            "id": 361695,
+            "shortName": "Aple Corp",
+            "squareLogoUrl": null
+          },
+          "employerRatings": {
+            "overallRating": 1.7
+          }
+        },
+        {
+          "__typename": "UgcSearchV3EmployerResult",
+          "employer": {
+            "counts": {
+              "globalJobCount": {
+                "jobCount": 0
+              },
+              "reviewCount": 0,
+              "salaryCount": 2
+            },
+            "id": 7201555,
+            "shortName": "Appel",
+            "squareLogoUrl": "https://media.glassdoor.com/sql/7201555/appel-squarelogo-1655981232733.png"
+          },
+          "employerRatings": {
+            "overallRating": -0.10000000149011612
+          }
+        },
+        {
+          "__typename": "UgcSearchV3EmployerResult",
+          "employer": {
+            "counts": {
+              "globalJobCount": {
+                "jobCount": 0
+              },
+              "reviewCount": 1,
+              "salaryCount": 1
+            },
+            "id": 3134702,
+            "shortName": "APPEL",
+            "squareLogoUrl": "https://media.glassdoor.com/sql/3134702/appel-squarelogo-1583823505368.png"
+          },
+          "employerRatings": {
+            "overallRating": 2.0
+          }
+        },
+        {
+          "__typename": "UgcSearchV3EmployerResult",
+          "employer": {
+            "counts": {
+              "globalJobCount": {
+                "jobCount": 0
+              },
+              "reviewCount": 1,
+              "salaryCount": 1
+            },
+            "id": 7430218,
+            "shortName": "De Appel",
+            "squareLogoUrl": "https://media.glassdoor.com/sql/7430218/de-appel-squarelogo-1658901710456.png"
+          },
+          "employerRatings": {
+            "overallRating": 3.0
+          }
+        }
+      ],
+      "numOfPagesAvailable": 117,
+      "pageNumber": 1
+    }
+  }
+}

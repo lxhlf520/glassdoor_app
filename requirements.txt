@@ -1,0 +1,6 @@
+# 推荐使用 uv 管理依赖，见 pyproject.toml
+# uv sync
+# 如用 pip: pip install -r requirements.txt
+curl-cffi>=0.7.0
+pymongo>=4.0
+requests>=2.31

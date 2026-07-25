@@ -1,0 +1,13 @@
+[project]
+name = "glassdoor-collector"
+version = "1.0.0"
+description = "Glassdoor 并行评论采集器 — APP API 反限流采集"
+requires-python = ">=3.11"
+dependencies = [
+    "curl-cffi>=0.7.0",
+    "pymongo>=4.0",
+    "requests>=2.31",
+]
+
+[tool.uv]
+dev-dependencies = []
