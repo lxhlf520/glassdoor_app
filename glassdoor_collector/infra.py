@@ -15,24 +15,17 @@ import curl_cffi.requests as curl_requests
 from pymongo import MongoClient
 
 from .clash import ClashAPI
+from .config import (
+    BAN_COOLDOWN,
+    DB_NAME,
+    FP_POOL,
+    FP_ROTATE_AFTER,
+    MONGO_URI,
+    PROXY_URL,
+    ROTATE_AFTER,
+)
 
-# ---------------------------------------------------------------------------
-# 支持环境变量覆盖，方便部署到不同机器
-MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
-DB_NAME = "glassdoor"
-
-PROXY_URL = os.environ.get("CLASH_MIXED", "http://127.0.0.1:7890")
 PROXIES = {"http": PROXY_URL, "https": PROXY_URL}
-
-ROTATE_AFTER = 250            # 每 IP 请求数上限
-BAN_COOLDOWN = 15 * 60        # 429/403 后节点冷却 15 分钟
-
-FP_POOL = [
-    "chrome110", "chrome120", "chrome124", "chrome131", "chrome133a",
-    "safari15_5", "safari17_0", "safari18_0", "edge101", "firefox133",
-    "chrome131_android", "chrome99_android",
-]
-FP_ROTATE_AFTER = 200         # 低于 ~500-600 指纹配额墙
 
 ALIVE_NODES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "_alive_nodes.json")

@@ -1,7 +1,6 @@
 """Glassdoor 全量公司发现 — 使用 40+ 关键词遍历 SearchCompanies"""
 import json
 import logging
-import os
 import random
 import time
 from datetime import datetime, timezone
@@ -9,44 +8,21 @@ from datetime import datetime, timezone
 import curl_cffi.requests as requests
 from pymongo import MongoClient, ASCENDING
 
-# ---------------------------------------------------------------------------
-MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
-DB_NAME = "glassdoor"
-COLLECTION_EMPLOYERS = "app_employers"
-
-GD_ID = "be049dd5-d7f8-4b33-a218-0e7a870d245a"
-CF_BM = "SiKUJAdeu0GQgksntu12lJ5yXs90iJ1wUIJepbLTlw4-1784880682.9974203-1.0.1.1-1y.bPFP2UgSt2DRzmBsYEQdIe0KiILc6ZFoQpJdDfVGmmstELMAF8hZMB9Hs_.Q.2KdcVUJ2m6njP1Dx4UD_kfjrNIz0PHtR0k32Szy37ANONXjb51Y6L2jXGA_RPkmm"
-
-# 经压力测试: 0 delay 也无 429，安全延迟 0.3s
-DELAY_BETWEEN_PAGES = 0.3
-DELAY_BETWEEN_TERMS = 1.0
-NUM_PER_PAGE = 100
-
-# Phase 1: 单字母全量扫描（每字母 99 页，API 硬上限 100 页）
-# 实测：单字母搜索是前缀匹配，跨字母 0% 重叠，每页 ~85-95 新公司
-SINGLE_LETTER_TERMS = [
-    "a", "b", "c", "d", "e", "f", "g", "h", "i", "j",
-    "k", "l", "m", "n", "o", "p", "q", "r", "s", "t",
-    "u", "v", "w", "x", "y", "z",
-]
-SINGLE_LETTER_MAX_PAGES = 99  # page 100 起返回空，API 硬上限
-
-# Phase 2: 行业/长关键词深挖
-DEEP_TERMS = [
-    "Software", "Consulting", "Bank", "Insurance", "Hospital",
-    "Health", "Tech", "Media", "Finance", "Marketing", "Retail",
-    "Energy", "Construction", "Education", "Law",
-    "Food", "Transport", "Pharma", "Hotel", "Design", "Security",
-    "University", "Capital", "Group", "Partners", "Global",
-    "Network", "Service", "Solution", "Digital", "Medical",
-    "Investment", "Manufacturing", "Agency", "Property", "Care",
-    "Research", "Data", "Cloud", "Systems", "Innovation",
-]
-
-# 每关键词最大页数 (0 = 不限)
-MAX_PAGES_PER_TERM = 0  # 全部
-# 安全上限：单关键词最多 500 页，避免部分太大词跑太久
-MAX_PAGES_CAP = 500
+from .config import (
+    CF_BM,
+    COLLECTION_EMPLOYERS,
+    DB_NAME,
+    DEEP_TERMS,
+    DELAY_BETWEEN_PAGES,
+    DELAY_BETWEEN_TERMS,
+    GD_ID,
+    MAX_PAGES_CAP,
+    MAX_PAGES_PER_TERM,
+    MONGO_URI,
+    NUM_PER_PAGE,
+    SINGLE_LETTER_MAX_PAGES,
+    SINGLE_LETTER_TERMS,
+)
 
 SEARCH_COMPANIES_QUERY = (
     "query SearchCompanies($employerSearchInput: EmployerSearchInput) { "

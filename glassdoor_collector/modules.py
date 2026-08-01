@@ -18,7 +18,6 @@ Salary 模块当前状态：
 """
 import argparse
 import logging
-import os
 import queue
 import threading
 import time
@@ -32,14 +31,15 @@ from .infra import (
     DB_NAME, fetch_graphql, fp_rotator, mongo_client, rate_limiter, rotator,
 )
 
-MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
-COLLECTION_EMPLOYERS = "app_employers"
-
-WORKERS = 4
-FLUSH_SIZE = 200
-STATS_INTERVAL = 30
-MAX_PAGES_PER_EMPLOYER = 3000
-MAX_PAGE_RETRIES = 5
+from .config import (
+    COLLECTION_EMPLOYERS,
+    MODULES_FLUSH_SIZE as FLUSH_SIZE,
+    MODULES_MAX_PAGE_RETRIES as MAX_PAGE_RETRIES,
+    MODULES_MAX_PAGES_PER_EMPLOYER as MAX_PAGES_PER_EMPLOYER,
+    MODULES_STATS_INTERVAL as STATS_INTERVAL,
+    MODULES_WORKERS as WORKERS,
+    MONGO_URI,
+)
 
 log = logging.getLogger("modules")
 

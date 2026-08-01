@@ -2,7 +2,6 @@
 import hashlib
 import json
 import logging
-import os
 import random
 import time
 from datetime import datetime, timezone
@@ -12,49 +11,22 @@ import curl_cffi.requests as requests
 from pymongo import MongoClient, ASCENDING
 from pymongo.errors import DuplicateKeyError
 
-# ---------------------------------------------------------------------------
-# 配置
-# ---------------------------------------------------------------------------
-MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
-DB_NAME = "glassdoor"
-COLLECTION_REVIEWS = "app_reviews"
-COLLECTION_EMPLOYERS = "app_employers"
-
-GD_ID = "be049dd5-d7f8-4b33-a218-0e7a870d245a"
-CF_BM = "SiKUJAdeu0GQgksntu12lJ5yXs90iJ1wUIJepbLTlw4-1784880682.9974203-1.0.1.1-1y.bPFP2UgSt2DRzmBsYEQdIe0KiILc6ZFoQpJdDfVGmmstELMAF8hZMB9Hs_.Q.2KdcVUJ2m6njP1Dx4UD_kfjrNIz0PHtR0k32Szy37ANONXjb51Y6L2jXGA_RPkmm"
-
-DELAY_BETWEEN_PAGES = (0.3, 0.8)  # 经压力测试: APP 无 429 限流
-DELAY_BETWEEN_EMPLOYERS = (1.5, 3)  # 安全间隔
-PAGE_SIZE = 20
-MAX_RETRIES = 3
-
-# 已知公司种子（从首页推荐获取）
-SEED_EMPLOYERS = [
-    1138,     # Apple Inc.
-    1596815,  # DeepMind Technologies Limited
-    235798,   # (from geb events)
-    321780,   # (from geb events)
-    7790,     # (from geb events)
-    252593,   # (from geb events)
-    18604,    # (from geb events)
-    40371,    # (from geb events)
-]
-
-# 公司搜索关键词（2-gram 覆盖 + 行业词）
-DISCOVERY_TERMS = [
-    # 英语最高频 2-gram
-    "in", "er", "an", "on", "at", "es", "en", "or", "al", "ti",
-    "te", "ic", "ar", "st", "re", "le", "ra", "li", "io", "nt",
-    "ed", "it", "ve", "co", "de", "ri", "ro", "ne", "ma", "ta",
-    "si", "el", "la", "ch", "me", "di", "un", "no", "pe", "ac",
-    # 行业关键词
-    "Software", "Consulting", "Bank", "Insurance", "Hospital",
-    "Health", "Tech", "Media", "Finance", "Marketing", "Retail",
-    "Energy", "Construction", "Real Estate", "Education", "Law",
-    "Food", "Transport", "Pharma", "Hotel", "Design", "Security",
-]
-DISCOVERY_PER_PAGE = 100
-DISCOVERY_MAX_PAGES = 5  # 每个关键词最多 5 页（500 家公司）
+from .config import (
+    CF_BM,
+    COLLECTION_EMPLOYERS,
+    COLLECTION_REVIEWS,
+    COLLECTOR_DELAY_EMPLOYERS as DELAY_BETWEEN_EMPLOYERS,
+    COLLECTOR_DELAY_PAGES as DELAY_BETWEEN_PAGES,
+    COLLECTOR_DISCOVERY_MAX_PAGES as DISCOVERY_MAX_PAGES,
+    COLLECTOR_DISCOVERY_PER_PAGE as DISCOVERY_PER_PAGE,
+    COLLECTOR_DISCOVERY_TERMS as DISCOVERY_TERMS,
+    COLLECTOR_MAX_RETRIES as MAX_RETRIES,
+    COLLECTOR_PAGE_SIZE as PAGE_SIZE,
+    DB_NAME,
+    GD_ID,
+    MONGO_URI,
+    SEED_EMPLOYERS,
+)
 
 # GraphQL 请求体模板（从 APP 抓包提取）
 SEARCH_COMPANIES_QUERY = (

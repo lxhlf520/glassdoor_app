@@ -9,7 +9,6 @@
 """
 import json
 import logging
-import os
 import queue
 import threading
 import time
@@ -24,19 +23,19 @@ from .infra import (
     mongo_client,
 )
 
-# ---------------------------------------------------------------------------
-MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
-COLLECTION_REVIEWS = "app_reviews"
-COLLECTION_EMPLOYERS = "app_employers"
-COLLECTION_PROGRESS = "app_review_progress"
-
-WORKERS = 8
-PAGE_SIZE = 100
-MAX_PAGE_RETRIES = 5
-MAX_PAGES_PER_EMPLOYER = 3000
-QUEUE_SIZE = 0
-FLUSH_SIZE = 500
-STATS_INTERVAL = 30
+from .config import (
+    COLLECTION_EMPLOYERS,
+    COLLECTION_REVIEWS,
+    COLLECTION_REVIEW_PROGRESS as COLLECTION_PROGRESS,
+    MONGO_URI,
+    PARALLEL_FLUSH_SIZE as FLUSH_SIZE,
+    PARALLEL_MAX_PAGE_RETRIES as MAX_PAGE_RETRIES,
+    PARALLEL_MAX_PAGES_PER_EMPLOYER as MAX_PAGES_PER_EMPLOYER,
+    PARALLEL_PAGE_SIZE as PAGE_SIZE,
+    PARALLEL_QUEUE_SIZE as QUEUE_SIZE,
+    PARALLEL_STATS_INTERVAL as STATS_INTERVAL,
+    PARALLEL_WORKERS as WORKERS,
+)
 
 REVIEWS_QUERY = (
     "query EmployerReviewsData($employerId: Int!, $page: Int!, $pageSize: Int!, "
