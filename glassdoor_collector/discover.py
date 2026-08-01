@@ -1,6 +1,7 @@
 """Glassdoor 全量公司发现 — 使用 40+ 关键词遍历 SearchCompanies"""
 import json
 import logging
+import os
 import random
 import time
 from datetime import datetime, timezone
@@ -9,7 +10,7 @@ import curl_cffi.requests as requests
 from pymongo import MongoClient, ASCENDING
 
 # ---------------------------------------------------------------------------
-MONGO_URI = "mongodb://localhost:27017"
+MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
 DB_NAME = "glassdoor"
 COLLECTION_EMPLOYERS = "app_employers"
 

@@ -1,17 +1,27 @@
-"""MongoDB app_employers → PostgreSQL glassdoor 迁移"""
+"""MongoDB app_employers → PostgreSQL glassdoor 迁移
+
+环境变量配置:
+  MONGO_URI         MongoDB 连接串 (默认 mongodb://localhost:27017)
+  PG_HOST           PostgreSQL 主机 (默认 localhost)
+  PG_PORT           PostgreSQL 端口 (默认 5432)
+  PG_USER           PostgreSQL 用户 (默认 postgres)
+  PG_PASSWORD       PostgreSQL 密码 (默认 long123456)
+  PG_DBNAME         PostgreSQL 数据库 (默认 glassdoor)
+"""
+import os
 import time
 import psycopg2
 import psycopg2.extras
 from pymongo import MongoClient
 
 PG_CONFIG = {
-    "host": "localhost",
-    "port": 5432,
-    "user": "postgres",
-    "password": "long123456",
-    "dbname": "glassdoor",
+    "host": os.environ.get("PG_HOST", "localhost"),
+    "port": int(os.environ.get("PG_PORT", "5432")),
+    "user": os.environ.get("PG_USER", "postgres"),
+    "password": os.environ.get("PG_PASSWORD", "long123456"),
+    "dbname": os.environ.get("PG_DBNAME", "glassdoor"),
 }
-MONGO_URI = "mongodb://localhost:27017"
+MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
 BATCH_SIZE = 2000
 
 

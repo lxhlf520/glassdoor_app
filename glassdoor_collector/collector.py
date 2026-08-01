@@ -2,6 +2,7 @@
 import hashlib
 import json
 import logging
+import os
 import random
 import time
 from datetime import datetime, timezone
@@ -14,7 +15,7 @@ from pymongo.errors import DuplicateKeyError
 # ---------------------------------------------------------------------------
 # 配置
 # ---------------------------------------------------------------------------
-MONGO_URI = "mongodb://localhost:27017"
+MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
 DB_NAME = "glassdoor"
 COLLECTION_REVIEWS = "app_reviews"
 COLLECTION_EMPLOYERS = "app_employers"
