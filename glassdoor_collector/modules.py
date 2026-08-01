@@ -1,22 +1,19 @@
 """Glassdoor 模块采集器：Pay & Benefits / Interviews / Jobs（公司岗位）
 
-复用 collector_infra.py 的反限流与 GraphQL 基础设施。
+复用 infra.py 的反限流与 GraphQL 基础设施。
 
 Jobs（公司招聘岗位）：
 - 使用 JobsSearchAndroid 查询，pageTypeEnum=SERP + searchParams.filterParams
   [{filterKey: employerId, values: <eid>}]，可纯净返回单公司岗位。
 - 分页用 pageNumber 递增（cursor 方式服务端报错）。SERP 相关性排序存在跨页
-  重复，故用 (listingId, employerId) 唯一索引去重，并在连续多页无新增时提前结束。
-
-Salary 模块当前状态：
-- SearchAggregatedSalaryEstimates / SearchSalaryEstimates / GetSalaryReport
-  返回 "Server error"，暂未实现，保留查询模板方便后续接入。
+  重复，故用 (listing_id, employer_id) 唯一索引去重，并在连续多页无新增时提前结束。
 
 用法示例：
-    uv run python module_collector.py --modules benefits,interviews,jobs --workers 4
-    uv run python module_collector.py --modules jobs --max-employers 10 --workers 1
+    uv run glassdoor-modules --modules benefits,interviews,jobs --workers 4
+    uv run glassdoor-modules --modules jobs --max-employers 10 --workers 1
 """
 import argparse
+import json
 import logging
 import queue
 import threading
@@ -24,22 +21,18 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from pymongo import ASCENDING, InsertOne
-from pymongo.errors import BulkWriteError
-
 from .infra import (
-    DB_NAME, fetch_graphql, fp_rotator, mongo_client, rate_limiter, rotator,
+    fetch_graphql, fp_rotator, rate_limiter, rotator,
 )
 
 from .config import (
-    COLLECTION_EMPLOYERS,
     MODULES_FLUSH_SIZE as FLUSH_SIZE,
     MODULES_MAX_PAGE_RETRIES as MAX_PAGE_RETRIES,
     MODULES_MAX_PAGES_PER_EMPLOYER as MAX_PAGES_PER_EMPLOYER,
     MODULES_STATS_INTERVAL as STATS_INTERVAL,
     MODULES_WORKERS as WORKERS,
-    MONGO_URI,
 )
+from .db import get_conn, init_all_tables, put_conn
 
 log = logging.getLogger("modules")
 
@@ -84,7 +77,6 @@ INTERVIEWS_QUERY = (
     "reviewDateTime source userQuestions { question answerCount } }"
 )
 
-# Jobs（公司岗位）查询：pageTypeEnum=SERP + filterParams(employerId) 已验证可用
 JOBS_QUERY = (
     "query JobsSearchAndroid($adSlotName: String, $pageTypeEnum: PageTypeEnum, $searchParams: SearchParams, "
     "$onlyCurrentGlassdoorAwards: Boolean! = true, $blcAwardsLimit: Int! = 30, $bptwAwardsLimit: Int! = 30) { "
@@ -105,23 +97,10 @@ JOBS_QUERY = (
     "fragment PaginationCursorFragment on PaginationCursor { cursor pageNumber }"
 )
 
-SALARY_AGGREGATED_QUERY_TEMPLATE = (
-    "query SearchAggregatedSalaryEstimates($cityId: Int, $countryId: Int, $metroId: Int, $stateId: Int, "
-    "$employerId: Int, $employerName: String, $goc: GOCIdent, $jobTitle: String!, $jobTitleId: Int, "
-    "$pageNumber: Int!, $pageSize: Int!, $payPeriod: PayPeriodEnum, $sort: SalariesSortOrder, $yearsOfExperience: YearsOfExperienceEnum) { "
-    "aggregatedSalaryEstimates(aggregatedSalaryEstimatesInput: { employer: { id: $employerId name: $employerName } goc: $goc "
-    "jobTitle: { id: $jobTitleId text: $jobTitle } location: { cityId: $cityId countryId: $countryId metroId: $metroId stateId: $stateId } "
-    "page: { num: $pageNumber size: $pageSize } sort: $sort viewAsPayPeriodId: $payPeriod yearsOfExperience: $yearsOfExperience } ) { "
-    "numPages results { basePayStatistics { mean } currency { code id } employer { counts { globalJobCount { jobCount } } id name "
-    "shortName squareLogoUrl ratings { overallRating } } jobTitle { id text gocId mgocId } payPeriod totalAdditionalPayStatistics { mean } "
-    "totalPayStatistics { __typename ...PayStatistics } } resultCount queryLocation { id name type } } } "
-    "fragment PayStatistics on StatisticsResult { percentiles { ident value } }"
-)
-
-
 # ---------------------------------------------------------------------------
-# 数据转换
+# 数据转换（保持原 dict 格式，flush 时映射到 PG 列）
 # ---------------------------------------------------------------------------
+
 def transform_benefit_review(r: dict, employer_id: int, employer_name: str,
                              country_id: int) -> dict[str, Any]:
     city = r.get("city") or {}
@@ -257,37 +236,143 @@ def fetch_module_page(operation: str, body: dict, employer_id: int,
 
 
 # ---------------------------------------------------------------------------
+# dict → PG row 映射函数
+# ---------------------------------------------------------------------------
+def _benefit_doc_to_row(doc: dict) -> tuple:
+    return (
+        doc["benefitReviewId"],
+        doc["employerId"],
+        doc.get("employerName", ""),
+        doc.get("countryId"),
+        doc.get("type", "review"),
+        doc.get("rating"),
+        doc.get("createDate"),
+        doc.get("currentJob"),
+        doc.get("userEnteredJobTitle"),
+        doc.get("cityName"),
+        doc.get("stateName"),
+        doc.get("metroName"),
+        doc.get("countryName"),
+        json.dumps(doc.get("benefitComments") or []),
+        doc.get("comment"),
+        doc.get("overallBenefitRating"),
+        doc.get("totalBenefitReviews", 0),
+        json.dumps(doc.get("benefitsCategoryToStatisticAggregates") or []),
+        doc.get("collectedAt"),
+    )
+
+
+def _interview_doc_to_row(doc: dict) -> tuple:
+    return (
+        doc["interviewId"],
+        doc["employerId"],
+        doc.get("employerName", ""),
+        doc.get("page", 0),
+        doc.get("advice"),
+        doc.get("countHelpful", 0),
+        doc.get("difficulty"),
+        doc.get("experience"),
+        doc.get("employerNameDetail"),
+        doc.get("employerSquareLogoUrl"),
+        json.dumps(doc.get("employerResponses") or []),
+        doc.get("featured", False),
+        doc.get("jobTitle"),
+        doc.get("negotiationDescription"),
+        doc.get("outcome"),
+        doc.get("processDescription"),
+        doc.get("reviewDateTime"),
+        doc.get("source"),
+        json.dumps(doc.get("userQuestions") or []),
+        doc.get("collectedAt"),
+    )
+
+
+def _job_doc_to_row(doc: dict) -> tuple:
+    return (
+        doc["listingId"],
+        doc["employerId"],
+        doc.get("employerName", ""),
+        doc.get("page", 0),
+        doc.get("jobTitleText"),
+        doc.get("normalizedJobTitle"),
+        doc.get("locationName"),
+        doc.get("locationType"),
+        doc.get("locId"),
+        doc.get("jobCountryId"),
+        doc.get("ageInDays"),
+        doc.get("applied"),
+        doc.get("easyApply"),
+        doc.get("expired"),
+        doc.get("isSponsoredJob"),
+        doc.get("payPeriod"),
+        doc.get("payCurrency"),
+        doc.get("payP10"),
+        doc.get("payP50"),
+        doc.get("payP90"),
+        doc.get("rating"),
+        doc.get("salarySource"),
+        doc.get("goc"),
+        doc.get("jobViewUrl"),
+        doc.get("employerNameFromSearch"),
+        doc.get("employerLogoUrl"),
+        doc.get("primaryIndustryId"),
+        doc.get("primaryIndustryName"),
+        doc.get("sectorId"),
+        doc.get("sectorName"),
+        doc.get("collectedAt"),
+    )
+
+
+# ---------------------------------------------------------------------------
 # 模块采集器基类
 # ---------------------------------------------------------------------------
+BENEFIT_COLUMNS = (
+    "benefit_review_id", "employer_id", "employer_name", "country_id", "type",
+    "rating", "create_date", "current_job", "user_entered_job_title",
+    "city_name", "state_name", "metro_name", "country_name",
+    "benefit_comments", "comment", "overall_benefit_rating",
+    "total_benefit_reviews", "benefits_category_aggregates", "collected_at",
+)
+
+INTERVIEW_COLUMNS = (
+    "interview_id", "employer_id", "employer_name", "page",
+    "advice", "count_helpful", "difficulty", "experience",
+    "employer_name_detail", "employer_logo_url", "employer_responses",
+    "featured", "job_title", "negotiation_desc", "outcome",
+    "process_description", "review_date_time", "source",
+    "user_questions", "collected_at",
+)
+
+JOB_COLUMNS = (
+    "listing_id", "employer_id", "employer_name", "page",
+    "job_title_text", "normalized_job_title", "location_name", "location_type",
+    "loc_id", "job_country_id", "age_in_days", "applied", "easy_apply",
+    "expired", "is_sponsored_job", "pay_period", "pay_currency",
+    "pay_p10", "pay_p50", "pay_p90", "rating", "salary_source",
+    "goc", "job_view_url", "employer_name_from_search", "employer_logo_url",
+    "primary_industry_id", "primary_industry_name", "sector_id", "sector_name",
+    "collected_at",
+)
+
+
 class BaseModuleCollector:
     name: str = ""
-    out_collection: str = ""
-    progress_collection: str = ""
+    out_table: str = ""
+    progress_table: str = ""
+    columns: tuple = ()
+    doc_to_row: Callable = lambda doc: ()
     page_size: int = 20
     operation: str = ""
     id_field_name: str = ""
 
     def __init__(self, max_employers: int | None = None,
                  workers: int = WORKERS, only_with_reviews: bool = True):
+        init_all_tables()
         self.max_employers = max_employers
         self.workers = workers
         self.only_with_reviews = only_with_reviews
-        self.client = mongo_client()
-        self.db = self.client[DB_NAME]
-        self.employers = self.db[COLLECTION_EMPLOYERS]
-        self.out = self.db[self.out_collection]
-        self.progress = self.db[self.progress_collection]
         self.q: queue.Queue = queue.Queue()
         self.stop_flag = threading.Event()
-        self._setup_indexes()
-
-    def _setup_indexes(self):
-        self.out.create_index(
-            [(self.id_field_name, ASCENDING), ("employerId", ASCENDING)],
-            unique=True, background=True)
-        self.out.create_index([("employerId", ASCENDING)], background=True)
-        self.progress.create_index(
-            [("employerId", ASCENDING)], unique=True, background=True)
 
     def build_task(self, employer_id: int, employer_name: str,
                    resume_doc: dict | None) -> dict:
@@ -296,84 +381,169 @@ class BaseModuleCollector:
     def collect_employer(self, task: dict, add_doc: Callable[[dict], None]) -> str:
         raise NotImplementedError
 
+    # ------------------------------------------------------------------
+    # Progress helpers
+    # ------------------------------------------------------------------
     def _init_progress(self, employer_id: int, employer_name: str,
                        total_pages: int | None = None, ctx: dict | None = None):
-        update: dict[str, Any] = {
-            "$set": {
-                "employerName": employer_name,
-                "status": "in_progress",
-                "nextPage": 1,
-                "startedAt": datetime.now(timezone.utc),
-                "updatedAt": datetime.now(timezone.utc),
-            },
-            "$setOnInsert": {"collected": 0, "failedPages": []},
-        }
-        if total_pages is not None:
-            update["$set"]["totalPages"] = total_pages
-        if ctx:
-            update["$set"]["ctx"] = ctx
-        self.progress.update_one(
-            {"employerId": employer_id}, update, upsert=True)
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""INSERT INTO {self.progress_table}
+                            (employer_id, employer_name, status, next_page,
+                             collected, failed_pages, total_pages, ctx, started_at, updated_at)
+                        VALUES (%s, %s, 'in_progress', 1, 0, '{{}}'::int[],
+                                %s, %s, %s, %s)
+                        ON CONFLICT (employer_id) DO UPDATE SET
+                            employer_name = EXCLUDED.employer_name,
+                            status = 'in_progress',
+                            started_at = EXCLUDED.started_at,
+                            updated_at = EXCLUDED.updated_at""",
+                    (employer_id, employer_name, total_pages,
+                     json.dumps(ctx or {}),
+                     datetime.now(timezone.utc), datetime.now(timezone.utc)))
+                conn.commit()
+        finally:
+            put_conn(conn)
 
     def _mark_page(self, employer_id: int, page: int, n: int):
-        self.progress.update_one(
-            {"employerId": employer_id},
-            {"$set": {"nextPage": page + 1,
-                      "updatedAt": datetime.now(timezone.utc)},
-             "$inc": {"collected": n}},
-            upsert=True,
-        )
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""INSERT INTO {self.progress_table}
+                            (employer_id, next_page, collected, updated_at)
+                        VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (employer_id) DO UPDATE SET
+                            next_page = EXCLUDED.next_page,
+                            collected = {self.progress_table}.collected + EXCLUDED.collected,
+                            updated_at = EXCLUDED.updated_at""",
+                    (employer_id, page + 1, n, datetime.now(timezone.utc)))
+                conn.commit()
+        finally:
+            put_conn(conn)
 
     def _mark_done(self, employer_id: int, status: str):
-        self.progress.update_one(
-            {"employerId": employer_id},
-            {"$set": {"status": status,
-                      "doneAt": datetime.now(timezone.utc),
-                      "updatedAt": datetime.now(timezone.utc)}},
-            upsert=True,
-        )
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""INSERT INTO {self.progress_table}
+                            (employer_id, status, done_at, updated_at)
+                        VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (employer_id) DO UPDATE SET
+                            status = EXCLUDED.status,
+                            done_at = EXCLUDED.done_at,
+                            updated_at = EXCLUDED.updated_at""",
+                    (employer_id, status, datetime.now(timezone.utc),
+                     datetime.now(timezone.utc)))
+                conn.commit()
+        finally:
+            put_conn(conn)
         with _stats_lock:
             _stats["employers_done"] += 1
 
     def _mark_error(self, employer_id: int, page: int):
-        self.progress.update_one(
-            {"employerId": employer_id},
-            {"$addToSet": {"failedPages": page},
-             "$set": {"status": "error",
-                      "updatedAt": datetime.now(timezone.utc)}},
-            upsert=True,
-        )
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""INSERT INTO {self.progress_table}
+                            (employer_id, failed_pages, status, updated_at)
+                        VALUES (%s, %s::int[], 'error', %s)
+                        ON CONFLICT (employer_id) DO UPDATE SET
+                            failed_pages = {self.progress_table}.failed_pages || %s::int,
+                            status = 'error',
+                            updated_at = %s
+                        WHERE NOT (%s::int = ANY({self.progress_table}.failed_pages))""",
+                    (employer_id, [page], datetime.now(timezone.utc),
+                     page, datetime.now(timezone.utc), page))
+                conn.commit()
+        finally:
+            put_conn(conn)
 
+    # ------------------------------------------------------------------
+    # Seeder: 从 PG 读取雇主列表 + 断点续传
+    # ------------------------------------------------------------------
     def seeder(self):
-        done_filter = {"status": {"$in": ["done", "done_empty",
-                                           "done_with_errors"]}}
-        done_ids = set(self.progress.distinct("employerId", done_filter))
-        in_progress = {
-            p["employerId"]: p
-            for p in self.progress.find(
-                {"status": "in_progress"},
-                {"employerId": 1, "nextPage": 1, "ctx": 1})
-        }
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                done_statuses = "('done', 'done_empty', 'done_with_errors')"
+                cur.execute(
+                    f"SELECT employer_id FROM {self.progress_table} "
+                    f"WHERE status IN {done_statuses}")
+                done_ids = {row[0] for row in cur.fetchall()}
+
+                cur.execute(
+                    f"SELECT employer_id, next_page, ctx FROM {self.progress_table} "
+                    f"WHERE status = 'in_progress'")
+                in_progress = {
+                    row[0]: {"nextPage": row[1], "ctx": row[2] or {}}
+                    for row in cur.fetchall()
+                }
+        finally:
+            put_conn(conn)
+
         log.info("[%s] seeder: %d done, %d in_progress",
                  self.name, len(done_ids), len(in_progress))
 
+        # 续传 in_progress
         for eid, p in in_progress.items():
-            ename = (self.employers.find_one(
-                {"employerId": eid}, {"shortName": 1}) or {}).get(
-                    "shortName", "")
+            conn2 = get_conn()
+            try:
+                with conn2.cursor() as cur:
+                    cur.execute(
+                        "SELECT name FROM employers WHERE employer_id = %s", (eid,))
+                    row = cur.fetchone()
+                    ename = row[0] if row else ""
+            finally:
+                put_conn(conn2)
             self.q.put(self.build_task(eid, ename, p))
 
-        query: dict[str, Any] = {"employerId": {"$nin": list(done_ids)}}
-        if self.only_with_reviews:
-            query["reviewCount"] = {"$gt": 0}
-        cursor = self.employers.find(
-            query, {"employerId": 1, "shortName": 1}).sort("reviewCount", -1)
+        # 新雇主
+        if done_ids:
+            done_list = list(done_ids)
+            conn3 = get_conn()
+            try:
+                with conn3.cursor() as cur:
+                    if self.only_with_reviews:
+                        cur.execute(
+                            """SELECT employer_id, name FROM employers
+                               WHERE review_count > 0 AND employer_id != ALL(%s::int[])
+                               ORDER BY review_count DESC""",
+                            (done_list,))
+                    else:
+                        cur.execute(
+                            """SELECT employer_id, name FROM employers
+                               WHERE employer_id != ALL(%s::int[])
+                               ORDER BY employer_id""",
+                            (done_list,))
+                    emp_list = [(row[0], row[1] or "") for row in cur.fetchall()]
+            finally:
+                put_conn(conn3)
+        else:
+            conn4 = get_conn()
+            try:
+                with conn4.cursor() as cur:
+                    if self.only_with_reviews:
+                        cur.execute(
+                            """SELECT employer_id, name FROM employers
+                               WHERE review_count > 0
+                               ORDER BY review_count DESC""")
+                    else:
+                        cur.execute(
+                            "SELECT employer_id, name FROM employers ORDER BY employer_id")
+                    emp_list = [(row[0], row[1] or "") for row in cur.fetchall()]
+            finally:
+                put_conn(conn4)
+
         n = 0
-        for emp in cursor:
-            eid = emp["employerId"]
+        for eid, ename in emp_list:
             if eid in in_progress:
                 continue
-            self.q.put(self.build_task(eid, emp.get("shortName", ""), None))
+            self.q.put(self.build_task(eid, ename, None))
             n += 1
             if self.max_employers and n >= self.max_employers:
                 break
@@ -387,20 +557,28 @@ class BaseModuleCollector:
         def flush():
             if not buf:
                 return
+            docs = [d for d in buf if d.get(self.id_field_name)]
+            if not docs:
+                buf.clear()
+                return
+            rows = [self.doc_to_row(d) for d in docs]
+            conn = get_conn()
             try:
-                ops = [InsertOne(d) for d in buf if d.get(self.id_field_name)]
-                if ops:
-                    self.out.bulk_write(ops, ordered=False)
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        f"""INSERT INTO {self.out_table} ({', '.join(self.columns)})
+                            VALUES %s
+                            ON CONFLICT DO NOTHING""",
+                        rows)
+                    inserted = cur.rowcount
+                    conn.commit()
                     with _stats_lock:
-                        _stats["docs"] += len(ops)
-            except BulkWriteError as bwe:
-                inserted = bwe.details.get("nInserted", 0)
-                with _stats_lock:
-                    _stats["docs"] += inserted
+                        _stats["docs"] += inserted
             except Exception as e:
                 log.warning("[w%d] flush error: %s", wid, str(e)[:100])
             finally:
                 buf.clear()
+                put_conn(conn)
 
         def add_doc(doc: dict):
             if not doc or not doc.get(self.id_field_name):
@@ -470,8 +648,6 @@ class BaseModuleCollector:
         log.info("=== %s DONE === req=%d fail=%d docs=%d employers=%d",
                  self.name.upper(), cur["req_ok"], cur["req_fail"],
                  cur["docs"], cur["employers_done"])
-        log.info("DB %s total: %d", self.out_collection,
-                 self.out.count_documents({}))
 
 
 # ---------------------------------------------------------------------------
@@ -479,8 +655,10 @@ class BaseModuleCollector:
 # ---------------------------------------------------------------------------
 class BenefitsCollector(BaseModuleCollector):
     name = "benefits"
-    out_collection = "app_benefits"
-    progress_collection = "app_benefits_progress"
+    out_table = "benefits"
+    progress_table = "benefits_progress"
+    columns = BENEFIT_COLUMNS
+    doc_to_row = staticmethod(_benefit_doc_to_row)
     page_size = 20
     operation = "EmployerBenefits"
     id_field_name = "benefitReviewId"
@@ -515,8 +693,7 @@ class BenefitsCollector(BaseModuleCollector):
         }
 
     def _probe_country(self, employer_id: int) -> tuple[int, dict] | None:
-        """先尝试美国（countryId=1），无数据则遍历公司支持的其他国家。
-        返回 (选中的 countryId, 第一页响应 data)。"""
+        """先尝试美国（countryId=1），无数据则遍历公司支持的其他国家。"""
         body = self._make_body(employer_id, 1, 1)
         status, data = fetch_module_page(self.operation, body, employer_id)
         if status != 200:
@@ -554,8 +731,7 @@ class BenefitsCollector(BaseModuleCollector):
             "employerName": employer_name,
             "countryId": country_id,
             "type": "overview",
-            "comment": (overview.get("employerBenefitSummary") or {}).get(
-                "comment"),
+            "comment": (overview.get("employerBenefitSummary") or {}).get("comment"),
             "overallBenefitRating": overview.get("overallBenefitRating"),
             "totalBenefitReviews": overview.get("totalBenefitReviews"),
             "benefitsCategoryToStatisticAggregates": overview.get(
@@ -582,9 +758,17 @@ class BenefitsCollector(BaseModuleCollector):
                                 ctx={"countryId": country_id})
         else:
             country_id = country_id or 1
-            if not self.progress.find_one({"employerId": eid}):
-                self._init_progress(eid, ename, total_pages=None,
-                                    ctx={"countryId": country_id})
+            conn = get_conn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"SELECT 1 FROM {self.progress_table} WHERE employer_id = %s",
+                        (eid,))
+                    if cur.fetchone() is None:
+                        self._init_progress(eid, ename, total_pages=None,
+                                            ctx={"countryId": country_id})
+            finally:
+                put_conn(conn)
 
         page = start_page
         while page <= MAX_PAGES_PER_EMPLOYER:
@@ -607,8 +791,7 @@ class BenefitsCollector(BaseModuleCollector):
                 reviews = []
 
             if page == 1:
-                add_doc(self._overview_doc(
-                    overview, eid, ename, country_id))
+                add_doc(self._overview_doc(overview, eid, ename, country_id))
                 if not reviews and not overview.get("totalBenefitReviews"):
                     self._mark_done(eid, "done_empty")
                     return "done_empty"
@@ -632,8 +815,10 @@ class BenefitsCollector(BaseModuleCollector):
 # ---------------------------------------------------------------------------
 class InterviewsCollector(BaseModuleCollector):
     name = "interviews"
-    out_collection = "app_interviews"
-    progress_collection = "app_interviews_progress"
+    out_table = "interviews"
+    progress_table = "interviews_progress"
+    columns = INTERVIEW_COLUMNS
+    doc_to_row = staticmethod(_interview_doc_to_row)
     page_size = 50
     operation = "EmployerInterviewsList"
     id_field_name = "interviewId"
@@ -674,8 +859,7 @@ class InterviewsCollector(BaseModuleCollector):
                 self._mark_error(eid, page)
                 return "error"
 
-            il = ((data.get("data") or {}).get(
-                "employerInterviewsList") or {})
+            il = ((data.get("data") or {}).get("employerInterviewsList") or {})
 
             if page == 1:
                 total_pages = min(il.get("totalNumberOfPages") or 0,
@@ -705,15 +889,14 @@ class InterviewsCollector(BaseModuleCollector):
 # ---------------------------------------------------------------------------
 class JobsCollector(BaseModuleCollector):
     name = "jobs"
-    out_collection = "app_jobs"
-    progress_collection = "app_jobs_progress"
-    page_size = 30  # 服务端固定每页 30 条
+    out_table = "jobs"
+    progress_table = "jobs_progress"
+    columns = JOB_COLUMNS
+    doc_to_row = staticmethod(_job_doc_to_row)
+    page_size = 30
     operation = "JobsSearchAndroid"
     id_field_name = "listingId"
-    # 注：SERP+employerId 只暴露相关性排序的子集（每公司约百条，即 App
-    # 展示的“热门岗位”），totalJobsCount 虽大但无法通过翻页全量枚举。
-    # 同一池会跨页重复，故靠唯一索引去重 + 连续无新增提前结束。
-    max_no_new_pages = 8  # 连续多少页无新增就提前结束
+    max_no_new_pages = 8
 
     def build_task(self, employer_id: int, employer_name: str,
                    resume_doc: dict | None) -> dict:
@@ -767,7 +950,7 @@ class JobsCollector(BaseModuleCollector):
                 if page == 1 and not items:
                     self._mark_done(eid, "done_empty")
                     return "done_empty"
-                if not self.progress.find_one({"employerId": eid}):
+                if not self._progress_exists(eid):
                     self._init_progress(eid, ename, total_pages=total_pages)
 
             new_this = 0
@@ -797,6 +980,17 @@ class JobsCollector(BaseModuleCollector):
         self._mark_done(eid, "done")
         return "done"
 
+    def _progress_exists(self, employer_id: int) -> bool:
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT 1 FROM {self.progress_table} WHERE employer_id = %s",
+                    (employer_id,))
+                return cur.fetchone() is not None
+        finally:
+            put_conn(conn)
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -815,7 +1009,7 @@ def main():
         help="每个模块的并发 worker 数")
     parser.add_argument(
         "--all-employers", action="store_true",
-        help="默认只采集 reviewCount>0 的公司；加上此参数则采集 app_employers 全部")
+        help="默认只采集 reviewCount>0 的公司；加上此参数则采集 employers 全部")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -847,8 +1041,19 @@ def main():
             log.warning("Unknown module: %s", name)
             continue
 
-        n_emp = c.employers.count_documents(
-            {"reviewCount": {"$gt": 0}} if c.only_with_reviews else {})
+        # 统计公司数
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                if c.only_with_reviews:
+                    cur.execute(
+                        "SELECT COUNT(*) FROM employers WHERE review_count > 0")
+                else:
+                    cur.execute("SELECT COUNT(*) FROM employers")
+                n_emp = cur.fetchone()[0]
+        finally:
+            put_conn(conn)
+
         log.info("Starting %s collection for %d employers (workers=%d)",
                  c.name, n_emp, c.workers)
         c.run()

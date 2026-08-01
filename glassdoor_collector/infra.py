@@ -1,7 +1,7 @@
 """Glassdoor 采集器公共基础设施
 
-包含：MongoDB 连接、FlClash 节点轮换、TLS 指纹轮换、令牌桶限速、
-GraphQL 请求封装。供 parallel_collector.py / module_collector.py 共用。
+包含：FlClash 节点轮换、TLS 指纹轮换、令牌桶限速、
+GraphQL 请求封装。供 parallel.py / modules.py 共用。
 """
 import json
 import logging
@@ -12,15 +12,12 @@ import time
 import uuid
 
 import curl_cffi.requests as curl_requests
-from pymongo import MongoClient
 
 from .clash import ClashAPI
 from .config import (
     BAN_COOLDOWN,
-    DB_NAME,
     FP_POOL,
     FP_ROTATE_AFTER,
-    MONGO_URI,
     PROXY_URL,
     ROTATE_AFTER,
 )
@@ -293,6 +290,3 @@ def fetch_graphql(operation: str, body: dict, timeout: int = 60) -> tuple[int, d
         log.warning("req error op=%s: %s", operation, str(e)[:100])
         return 0, {}
 
-
-def mongo_client() -> MongoClient:
-    return MongoClient(MONGO_URI)

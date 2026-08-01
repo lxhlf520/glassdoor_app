@@ -1,4 +1,4 @@
-"""Glassdoor APP 评论采集器 — 纯协议调用，存储至 MongoDB"""
+"""Glassdoor APP 评论采集器（legacy 单线程版）— 纯协议调用，存储至 PostgreSQL"""
 import hashlib
 import json
 import logging
@@ -8,13 +8,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 import curl_cffi.requests as requests
-from pymongo import MongoClient, ASCENDING
-from pymongo.errors import DuplicateKeyError
 
 from .config import (
     CF_BM,
-    COLLECTION_EMPLOYERS,
-    COLLECTION_REVIEWS,
     COLLECTOR_DELAY_EMPLOYERS as DELAY_BETWEEN_EMPLOYERS,
     COLLECTOR_DELAY_PAGES as DELAY_BETWEEN_PAGES,
     COLLECTOR_DISCOVERY_MAX_PAGES as DISCOVERY_MAX_PAGES,
@@ -22,13 +18,11 @@ from .config import (
     COLLECTOR_DISCOVERY_TERMS as DISCOVERY_TERMS,
     COLLECTOR_MAX_RETRIES as MAX_RETRIES,
     COLLECTOR_PAGE_SIZE as PAGE_SIZE,
-    DB_NAME,
     GD_ID,
-    MONGO_URI,
     SEED_EMPLOYERS,
 )
+from .db import get_conn, init_all_tables, put_conn
 
-# GraphQL 请求体模板（从 APP 抓包提取）
 SEARCH_COMPANIES_QUERY = (
     "query SearchCompanies($employerSearchInput: EmployerSearchInput) { "
     "  employerSearchRG(employerSearchInput: $employerSearchInput) { "
@@ -91,23 +85,11 @@ REVIEWS_QUERY = (
 log = logging.getLogger("glassdoor")
 
 
-# ---------------------------------------------------------------------------
-# Collector
-# ---------------------------------------------------------------------------
 class GlassdoorCollector:
-    """Glassdoor APP 评论采集器"""
+    """Glassdoor APP 评论采集器（legacy 单线程版）"""
 
     def __init__(self) -> None:
-        self.client = MongoClient(MONGO_URI)
-        self.db = self.client[DB_NAME]
-        self.reviews = self.db[COLLECTION_REVIEWS]
-        self.employers = self.db[COLLECTION_EMPLOYERS]
-
-        # 确保索引
-        self.reviews.create_index([("reviewId", ASCENDING)], unique=True, background=True)
-        self.reviews.create_index([("employerId", ASCENDING)], background=True)
-        self.employers.create_index([("employerId", ASCENDING)], unique=True, background=True)
-
+        init_all_tables()
         self.session = requests.Session()
         self._cf_bm = CF_BM
         self._gd_id = GD_ID
@@ -148,7 +130,6 @@ class GlassdoorCollector:
         return resp
 
     def _retry_post(self, body: dict, operation: str = "EmployerReviewsData") -> dict:
-        """带重试的 POST，返回解析后的 JSON"""
         for attempt in range(MAX_RETRIES):
             try:
                 resp = self._post(body, operation)
@@ -170,17 +151,20 @@ class GlassdoorCollector:
     # ------------------------------------------------------------------
     def _collect_employer_reviews(self, employer_id: int, total_pages: int,
                                    employer_name: str = "") -> int:
-        """采集单个公司的所有评论，返回新增数量"""
         new_count = 0
         for page in range(1, total_pages + 1):
-            # 断点检查：跳过已有数据的页
-            check = self.reviews.find_one(
-                {"employerId": employer_id, "page": page},
-                {"_id": 1},
-            )
-            if check:
-                log.debug("  page %d already collected, skip", page)
-                continue
+            # 断点检查
+            conn = get_conn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT 1 FROM reviews WHERE employer_id = %s AND page = %s LIMIT 1",
+                        (employer_id, page))
+                    if cur.fetchone():
+                        log.debug("  page %d already collected, skip", page)
+                        continue
+            finally:
+                put_conn(conn)
 
             body = {
                 "operationName": "EmployerReviewsData",
@@ -215,26 +199,58 @@ class GlassdoorCollector:
                 docs.append(doc)
 
             if docs:
+                conn2 = get_conn()
                 try:
-                    self.reviews.insert_many(docs, ordered=False)
-                    new_count += len(docs)
-                except Exception:
-                    # fallback to single insert for duplicates
-                    for doc in docs:
-                        try:
-                            self.reviews.insert_one(doc)
-                            new_count += 1
-                        except DuplicateKeyError:
-                            pass
+                    with conn2.cursor() as cur:
+                        cur.executemany(
+                            """INSERT INTO reviews (
+                                   review_id, employer_id, employer_name, page,
+                                   featured, review_date_time, summary, is_current_job,
+                                   length_of_employment, location_id, location_name,
+                                   rating_overall, rating_recommend, rating_ceo,
+                                   rating_business_outlook, rating_career_opp,
+                                   rating_comp_benefits, rating_culture_values,
+                                   rating_diversity, rating_senior_leadership,
+                                   rating_work_life_balance,
+                                   pros, cons, advice, count_helpful,
+                                   has_employer_response, employer_responses,
+                                   job_title, collected_at
+                               ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                                         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                                         %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                               ON CONFLICT (review_id) DO NOTHING""",
+                            [(
+                                d["reviewId"], d["employerId"], d.get("employerName", ""),
+                                d.get("page", 0), d.get("featured", False),
+                                d.get("reviewDateTime"), d.get("summary"),
+                                d.get("isCurrentJob"), d.get("lengthOfEmployment"),
+                                d.get("locationId"), d.get("locationName"),
+                                d.get("ratingOverall"), d.get("ratingRecommendToFriend"),
+                                d.get("ratingCeo"), d.get("ratingBusinessOutlook"),
+                                d.get("ratingCareerOpportunities"),
+                                d.get("ratingCompensationAndBenefits"),
+                                d.get("ratingCultureAndValues"),
+                                d.get("ratingDiversityAndInclusion"),
+                                d.get("ratingSeniorLeadership"),
+                                d.get("ratingWorkLifeBalance"),
+                                d.get("pros"), d.get("cons"), d.get("advice"),
+                                d.get("countHelpful", 0),
+                                d.get("hasEmployerResponse", False),
+                                json.dumps(d.get("employerResponses") or []),
+                                d.get("jobTitle"), d.get("captured_at"),
+                            ) for d in docs])
+                        inserted = cur.rowcount
+                        conn2.commit()
+                        new_count += inserted
+                finally:
+                    put_conn(conn2)
 
             log.info("  page %d/%d: %d reviews (new: %d)",
                      page, total_pages, len(reviews), new_count)
 
-            # rate limit
             delay = random.uniform(*DELAY_BETWEEN_PAGES)
             time.sleep(delay)
 
-            # 动态更新 total_pages（可能后台变化）
             actual_pages = er.get("numberOfPages", total_pages)
             if actual_pages > total_pages:
                 total_pages = actual_pages
@@ -245,11 +261,9 @@ class GlassdoorCollector:
     @staticmethod
     def _transform_review(r: dict, employer_id: int, employer_name: str,
                            page: int) -> dict[str, Any]:
-        """将 API 响应转换为 MongoDB 文档"""
         loc = r.get("location") or {}
         jt = r.get("jobTitle") or {}
         emp = r.get("employer") or {}
-
         return {
             "reviewId": r.get("reviewId"),
             "employerId": employer_id,
@@ -290,7 +304,6 @@ class GlassdoorCollector:
     # ------------------------------------------------------------------
     def discover_companies(self, terms: list[str] | None = None,
                             max_pages: int = DISCOVERY_MAX_PAGES) -> int:
-        """通过关键词搜索发现公司，返回新增公司数量"""
         if terms is None:
             terms = DISCOVERY_TERMS
 
@@ -326,37 +339,48 @@ class GlassdoorCollector:
                 if not results:
                     break
 
+                batch = []
                 for r in results:
                     emp = r.get("employer", {})
                     eid = emp.get("id")
                     if not eid:
                         continue
-                    if self.employers.find_one({"employerId": eid}, {"_id": 1}):
-                        continue  # 已存在
 
                     ratings = r.get("employerRatings", {}) or {}
                     counts = emp.get("counts", {}) or {}
                     global_jobs = counts.get("globalJobCount", {}) or {}
 
-                    doc = {
-                        "employerId": eid,
-                        "shortName": emp.get("shortName", ""),
-                        "name": emp.get("shortName", ""),
-                        "logoUrl": emp.get("squareLogoUrl"),
-                        "overallRating": ratings.get("overallRating"),
-                        "reviewCount": counts.get("reviewCount", 0),
-                        "salaryCount": counts.get("salaryCount", 0),
-                        "jobCount": global_jobs.get("jobCount", 0),
-                        "discoveredVia": term,
-                        "discoveredAt": datetime.now(timezone.utc),
-                    }
-                    self.employers.update_one(
-                        {"employerId": eid},
-                        {"$setOnInsert": doc},
-                        upsert=True,
-                    )
-                    new_count += 1
-                    total_results += 1
+                    batch.append((
+                        eid,
+                        emp.get("shortName", ""),
+                        emp.get("shortName", ""),
+                        emp.get("squareLogoUrl"),
+                        ratings.get("overallRating"),
+                        counts.get("reviewCount", 0),
+                        counts.get("salaryCount", 0),
+                        global_jobs.get("jobCount", 0),
+                        term,
+                        datetime.now(timezone.utc),
+                    ))
+
+                if batch:
+                    conn = get_conn()
+                    try:
+                        with conn.cursor() as cur:
+                            cur.executemany(
+                                """INSERT INTO employers (
+                                       employer_id, name, short_name, logo_url,
+                                       overall_rating, review_count, salary_count,
+                                       job_count, discovered_via, discovered_at
+                                   ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                   ON CONFLICT (employer_id) DO NOTHING""",
+                                batch)
+                            inserted = cur.rowcount
+                            conn.commit()
+                            new_count += inserted
+                            total_results += len(batch)
+                    finally:
+                        put_conn(conn)
 
                 log.info("  page %d/%d: %d results (total: %d, new: %d)",
                          page, min(available_pages, max_pages),
@@ -372,20 +396,30 @@ class GlassdoorCollector:
         return new_count
 
     def get_employer_ids(self, min_reviews: int = 1) -> list[int]:
-        """获取待采集的公司 ID 列表（可设定最小评论数阈值）"""
-        pipeline = [
-            {"$match": {"reviewCount": {"$gte": min_reviews}}},
-            {"$sort": {"reviewCount": -1}},
-            {"$project": {"employerId": 1, "name": 1, "reviewCount": 1}},
-        ]
-        return [doc["employerId"] for doc in self.employers.aggregate(pipeline)]
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT employer_id FROM employers
+                       WHERE review_count >= %s
+                       ORDER BY review_count DESC""",
+                    (min_reviews,))
+                return [row[0] for row in cur.fetchall()]
+        finally:
+            put_conn(conn)
 
     def seed_employers(self) -> None:
-        """写入种子公司记录，并尝试获取名称"""
         for eid in SEED_EMPLOYERS:
-            if self.employers.find_one({"employerId": eid}):
-                continue
-            # 尝试用评论接口第一页获取名称
+            conn = get_conn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT 1 FROM employers WHERE employer_id = %s", (eid,))
+                    if cur.fetchone():
+                        continue
+            finally:
+                put_conn(conn)
+
             name = ""
             try:
                 body = {
@@ -412,12 +446,17 @@ class GlassdoorCollector:
             except Exception as exc:
                 log.warning("Failed to get name for %d: %s", eid, exc)
 
-            self.employers.update_one(
-                {"employerId": eid},
-                {"$set": {"employerId": eid, "name": name,
-                          "seeded_at": datetime.now(timezone.utc)}},
-                upsert=True,
-            )
+            conn2 = get_conn()
+            try:
+                with conn2.cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO employers (employer_id, name, discovered_at)
+                           VALUES (%s, %s, %s)
+                           ON CONFLICT (employer_id) DO UPDATE SET name = EXCLUDED.name""",
+                        (eid, name, datetime.now(timezone.utc)))
+                    conn2.commit()
+            finally:
+                put_conn(conn2)
 
     # ------------------------------------------------------------------
     # 主入口
@@ -425,13 +464,6 @@ class GlassdoorCollector:
     def collect_all(self, employer_ids: list[int] | None = None,
                      max_employers: int = 0,
                      max_pages_per_employer: int = 0) -> dict:
-        """采集所有指定公司（或全部已发现公司）的评论
-
-        Args:
-            employer_ids: 指定公司列表，None=从 DB 获取所有
-            max_employers: 最多采集公司数，0=全部
-            max_pages_per_employer: 每公司最多页数，0=全部
-        """
         if employer_ids is None:
             employer_ids = self.get_employer_ids(min_reviews=1)
             if not employer_ids:
@@ -469,14 +501,17 @@ class GlassdoorCollector:
 
                 log.info("  %s: %d reviews, %d pages", name, total_reviews, total_pages)
 
-                # 更新公司记录
-                self.employers.update_one(
-                    {"employerId": eid},
-                    {"$set": {"employerId": eid, "name": name,
-                              "totalReviews": total_reviews,
-                              "totalPages": total_pages}},
-                    upsert=True,
-                )
+                conn = get_conn()
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """INSERT INTO employers (employer_id, name)
+                               VALUES (%s, %s)
+                               ON CONFLICT (employer_id) DO UPDATE SET name = EXCLUDED.name""",
+                            (eid, name))
+                        conn.commit()
+                finally:
+                    put_conn(conn)
 
                 if total_pages == 0:
                     log.info("  No reviews, skip")
@@ -511,25 +546,29 @@ def main():
     )
     collector = GlassdoorCollector()
 
-    # Step 1: 发现公司
     log.info("=== Phase 1: Discover companies ===")
-    # 先试用少量关键词快速测试
     test_terms = ["Software", "Consulting", "Tech", "Health", "Finance"]
     new_employers = collector.discover_companies(terms=test_terms, max_pages=3)
     log.info("Discovered %d new employers", new_employers)
 
-    total = collector.employers.count_documents({})
-    with_reviews = collector.employers.count_documents({"reviewCount": {"$gt": 0}})
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM employers")
+            total = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM employers WHERE review_count > 0")
+            with_reviews = cur.fetchone()[0]
+    finally:
+        put_conn(conn)
     log.info("Total employers in DB: %d (%d with reviews)", total, with_reviews)
 
-    # Step 2: 采集评论（按评论数从高到低）
     employer_ids = collector.get_employer_ids(min_reviews=10)
     log.info("=== Phase 2: Collect reviews for %d employers ===", len(employer_ids))
 
     stats = collector.collect_all(
         employer_ids=employer_ids,
-        max_employers=50,        # 先限制 50 家公司
-        max_pages_per_employer=10,  # 每公司最多 10 页
+        max_employers=50,
+        max_pages_per_employer=10,
     )
     print(f"\nDone. {stats['total_new']} new reviews across {stats['companies']} companies.")
 

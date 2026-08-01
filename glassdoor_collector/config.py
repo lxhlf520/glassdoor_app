@@ -2,19 +2,13 @@
 
 所有配置项均支持环境变量覆盖，便于不同环境部署。
 使用方式:
-    from .config import MONGO_URI, DB_NAME, ...
+    from .config import PG_CONFIG, PARALLEL_WORKERS, ...
 """
 
 import os
 
 # ============================================================================
-# MongoDB
-# ============================================================================
-MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
-DB_NAME = "glassdoor"
-
-# ============================================================================
-# PostgreSQL（仅 migrate 使用）
+# PostgreSQL（主存储）
 # ============================================================================
 PG_CONFIG = {
     "host": os.environ.get("PG_HOST", "localhost"),
@@ -23,20 +17,6 @@ PG_CONFIG = {
     "password": os.environ.get("PG_PASSWORD", "long123456"),
     "dbname": os.environ.get("PG_DBNAME", "glassdoor"),
 }
-
-# ============================================================================
-# MongoDB 集合名
-# ============================================================================
-COLLECTION_EMPLOYERS = "app_employers"
-COLLECTION_REVIEWS = "app_reviews"
-COLLECTION_REVIEW_PROGRESS = "app_review_progress"
-COLLECTION_DISCOVERY_PROGRESS = "app_discovery_progress"
-COLLECTION_BENEFITS = "app_benefits"
-COLLECTION_BENEFITS_PROGRESS = "app_benefits_progress"
-COLLECTION_INTERVIEWS = "app_interviews"
-COLLECTION_INTERVIEWS_PROGRESS = "app_interviews_progress"
-COLLECTION_JOBS = "app_jobs"
-COLLECTION_JOBS_PROGRESS = "app_jobs_progress"
 
 # ============================================================================
 # 代理 & 反限流 (infra)
@@ -135,7 +115,4 @@ MODULES_STATS_INTERVAL = 30
 MODULES_MAX_PAGES_PER_EMPLOYER = 3000
 MODULES_MAX_PAGE_RETRIES = 5
 
-# ============================================================================
-# 迁移 (migrate)
-# ============================================================================
-MIGRATE_BATCH_SIZE = 2000
+

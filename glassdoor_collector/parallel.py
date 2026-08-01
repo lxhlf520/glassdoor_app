@@ -1,11 +1,11 @@
-"""Glassdoor 并行评论采集器
+"""Glassdoor 并行评论采集器 — 纯协议调用，存储至 PostgreSQL
 
 提速策略（实测）：
 - pageSize=100（服务端上限），请求数降为 1/5
 - 8 线程并发，实测 4.5 req/s 无 429
-- 断点续跑：app_review_progress 按公司记录 donePages
+- 断点续跑：review_progress 按公司记录 done_pages
 
-基础设施（节点/指纹/限速）已迁移至 collector_infra.py。
+基础设施（节点/指纹/限速）已迁移至 infra.py。
 """
 import json
 import logging
@@ -15,19 +15,11 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from pymongo import MongoClient, ASCENDING, InsertOne
-from pymongo.errors import BulkWriteError
-
 from .infra import (
-    DB_NAME, fp_rotator, rate_limiter, rotator, fetch_graphql,
-    mongo_client,
+    fp_rotator, rate_limiter, rotator, fetch_graphql,
 )
 
 from .config import (
-    COLLECTION_EMPLOYERS,
-    COLLECTION_REVIEWS,
-    COLLECTION_REVIEW_PROGRESS as COLLECTION_PROGRESS,
-    MONGO_URI,
     PARALLEL_FLUSH_SIZE as FLUSH_SIZE,
     PARALLEL_MAX_PAGE_RETRIES as MAX_PAGE_RETRIES,
     PARALLEL_MAX_PAGES_PER_EMPLOYER as MAX_PAGES_PER_EMPLOYER,
@@ -36,6 +28,7 @@ from .config import (
     PARALLEL_STATS_INTERVAL as STATS_INTERVAL,
     PARALLEL_WORKERS as WORKERS,
 )
+from .db import get_conn, init_all_tables, put_conn
 
 REVIEWS_QUERY = (
     "query EmployerReviewsData($employerId: Int!, $page: Int!, $pageSize: Int!, "
@@ -53,7 +46,7 @@ REVIEWS_QUERY = (
     "    worldwideFilter: true dynamicProfileId: $bestProfileId "
     "    useRowProfileTldForRatings: false language: $language "
     "  }) { filteredReviewsCount numberOfPages "
-    "    reviews { __typename ...EmployerReviewListFragment } } "
+    "    reviews { __typename ...EmployerReviewListFragment } "
     "}  "
     "fragment EmployerReviewListFragment on EmployerReviewRG { "
     "  reviewId featured reviewDateTime summary isCurrentJob "
@@ -97,6 +90,56 @@ def _adaptive_sleep():
         time.sleep(10)
     elif n >= 5:
         time.sleep(3)
+
+
+# ---------------------------------------------------------------------------
+# dict → PG tuple 映射
+# ---------------------------------------------------------------------------
+REVIEW_COLUMNS = (
+    "review_id", "employer_id", "employer_name", "page", "featured",
+    "review_date_time", "summary", "is_current_job", "length_of_employment",
+    "location_id", "location_name",
+    "rating_overall", "rating_recommend", "rating_ceo",
+    "rating_business_outlook", "rating_career_opp", "rating_comp_benefits",
+    "rating_culture_values", "rating_diversity", "rating_senior_leadership",
+    "rating_work_life_balance",
+    "pros", "cons", "advice", "count_helpful", "has_employer_response",
+    "employer_responses", "job_title", "collected_at",
+)
+
+
+def _review_doc_to_row(doc: dict) -> tuple:
+    return (
+        doc["reviewId"],
+        doc["employerId"],
+        doc.get("employerName", ""),
+        doc.get("page", 0),
+        doc.get("featured", False),
+        doc.get("reviewDateTime"),
+        doc.get("summary"),
+        doc.get("isCurrentJob"),
+        doc.get("lengthOfEmployment"),
+        doc.get("locationId"),
+        doc.get("locationName"),
+        doc.get("ratingOverall"),
+        doc.get("ratingRecommendToFriend"),
+        doc.get("ratingCeo"),
+        doc.get("ratingBusinessOutlook"),
+        doc.get("ratingCareerOpportunities"),
+        doc.get("ratingCompensationAndBenefits"),
+        doc.get("ratingCultureAndValues"),
+        doc.get("ratingDiversityAndInclusion"),
+        doc.get("ratingSeniorLeadership"),
+        doc.get("ratingWorkLifeBalance"),
+        doc.get("pros"),
+        doc.get("cons"),
+        doc.get("advice"),
+        doc.get("countHelpful", 0),
+        doc.get("hasEmployerResponse", False),
+        json.dumps(doc.get("employerResponses") or []),
+        doc.get("jobTitle"),
+        doc.get("collectedAt"),
+    )
 
 
 def fetch_page(employer_id: int, page: int) -> tuple[int, dict]:
@@ -157,35 +200,92 @@ def transform_review(r: dict, employer_id: int, employer_name: str,
 
 class ParallelCollector:
     def __init__(self):
-        self.client = mongo_client()
-        self.db = self.client[DB_NAME]
-        self.reviews = self.db[COLLECTION_REVIEWS]
-        self.employers = self.db[COLLECTION_EMPLOYERS]
-        self.progress = self.db[COLLECTION_PROGRESS]
-        self.reviews.create_index([("reviewId", ASCENDING)], unique=True, background=True)
-        self.reviews.create_index([("employerId", ASCENDING)], background=True)
-        self.progress.create_index([("employerId", ASCENDING)], unique=True, background=True)
+        init_all_tables()
         self.q: queue.Queue = queue.Queue(maxsize=QUEUE_SIZE)
         self.stop_flag = threading.Event()
 
-    def _mark_page_done(self, eid: int, page: int, n_new: int):
-        self.progress.update_one(
-            {"employerId": eid},
-            {"$addToSet": {"donePages": page},
-             "$inc": {"collected": n_new},
-             "$set": {"updatedAt": datetime.now(timezone.utc)}},
-            upsert=True,
-        )
+    # ------------------------------------------------------------------
+    # Progress helpers (PG)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _mark_page_done(eid: int, page: int, n_new: int):
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO review_progress (employer_id, done_pages, collected, updated_at)
+                       VALUES (%s, %s::int[], %s, %s)
+                       ON CONFLICT (employer_id) DO UPDATE SET
+                           done_pages = review_progress.done_pages || %s::int,
+                           collected = review_progress.collected + %s,
+                           updated_at = %s
+                       WHERE NOT (%s::int = ANY(review_progress.done_pages))""",
+                    (eid, [page], n_new, datetime.now(timezone.utc),
+                     page, n_new, datetime.now(timezone.utc), page))
+                conn.commit()
+        finally:
+            put_conn(conn)
 
-    def _mark_employer_done(self, eid: int, status: str = "done"):
-        self.progress.update_one(
-            {"employerId": eid},
-            {"$set": {"status": status, "doneAt": datetime.now(timezone.utc),
-                      "updatedAt": datetime.now(timezone.utc)}},
-            upsert=True,
-        )
+    @staticmethod
+    def _mark_page_failed(eid: int, page: int):
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO review_progress (employer_id, failed_pages, updated_at)
+                       VALUES (%s, %s::int[], %s)
+                       ON CONFLICT (employer_id) DO UPDATE SET
+                           failed_pages = review_progress.failed_pages || %s::int,
+                           updated_at = %s
+                       WHERE NOT (%s::int = ANY(review_progress.failed_pages))""",
+                    (eid, [page], datetime.now(timezone.utc),
+                     page, datetime.now(timezone.utc), page))
+                conn.commit()
+        finally:
+            put_conn(conn)
+
+    @staticmethod
+    def _mark_employer_done(eid: int, status: str = "done"):
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO review_progress (employer_id, status, done_at, updated_at)
+                       VALUES (%s, %s, %s, %s)
+                       ON CONFLICT (employer_id) DO UPDATE SET
+                           status = EXCLUDED.status,
+                           done_at = EXCLUDED.done_at,
+                           updated_at = EXCLUDED.updated_at""",
+                    (eid, status, datetime.now(timezone.utc),
+                     datetime.now(timezone.utc)))
+                conn.commit()
+        finally:
+            put_conn(conn)
         with _stats_lock:
             _stats["employers_done"] += 1
+
+    @staticmethod
+    def _upsert_progress(eid: int, ename: str, total_pages: int):
+        """page=1 时初始化进度"""
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO review_progress
+                           (employer_id, employer_name, total_pages, status,
+                            done_pages, failed_pages, collected, started_at, updated_at)
+                       VALUES (%s, %s, %s, 'in_progress', '{}'::int[], '{}'::int[], 0, %s, %s)
+                       ON CONFLICT (employer_id) DO UPDATE SET
+                           employer_name = EXCLUDED.employer_name,
+                           total_pages = EXCLUDED.total_pages,
+                           status = 'in_progress',
+                           started_at = EXCLUDED.started_at,
+                           updated_at = EXCLUDED.updated_at""",
+                    (eid, ename, total_pages,
+                     datetime.now(timezone.utc), datetime.now(timezone.utc)))
+                conn.commit()
+        finally:
+            put_conn(conn)
 
     def worker(self, wid: int):
         buf: list[dict] = []
@@ -193,20 +293,27 @@ class ParallelCollector:
         def flush():
             if not buf:
                 return
+            docs = [d for d in buf if d.get("reviewId")]
+            if not docs:
+                buf.clear()
+                return
+            rows = [_review_doc_to_row(d) for d in docs]
+            conn = get_conn()
             try:
-                ops = [InsertOne(d) for d in buf if d.get("reviewId")]
-                if ops:
-                    self.reviews.bulk_write(ops, ordered=False)
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        """INSERT INTO reviews (%s) VALUES %%s
+                           ON CONFLICT (review_id) DO NOTHING""" % ", ".join(REVIEW_COLUMNS),
+                        rows)
+                    inserted = cur.rowcount
+                    conn.commit()
                     with _stats_lock:
-                        _stats["reviews"] += len(ops)
-            except BulkWriteError as bwe:
-                inserted = bwe.details.get("nInserted", 0)
-                with _stats_lock:
-                    _stats["reviews"] += inserted
+                        _stats["reviews"] += inserted
             except Exception as e:
                 log.warning("[w%d] flush error: %s", wid, str(e)[:100])
             finally:
                 buf.clear()
+                put_conn(conn)
 
         while not self.stop_flag.is_set():
             try:
@@ -224,9 +331,7 @@ class ParallelCollector:
             status, data = fetch_page(eid, page)
             if status == -1:
                 log.warning("[w%d] employer permanent fail eid=%s p%d", wid, eid, page)
-                self.progress.update_one(
-                    {"employerId": eid},
-                    {"$addToSet": {"failedPages": page}}, upsert=True)
+                self._mark_page_failed(eid, page)
                 self.q.task_done()
                 continue
             if status != 200:
@@ -235,9 +340,7 @@ class ParallelCollector:
                     self.q.put((eid, ename, page, retries + 1))
                 else:
                     log.warning("[w%d] page giveup eid=%s p%d", wid, eid, page)
-                    self.progress.update_one(
-                        {"employerId": eid},
-                        {"$addToSet": {"failedPages": page}}, upsert=True)
+                    self._mark_page_failed(eid, page)
                 with _stats_lock:
                     _stats["req_fail"] += 1
                 self.q.task_done()
@@ -253,16 +356,7 @@ class ParallelCollector:
                                   MAX_PAGES_PER_EMPLOYER)
 
             if page == 1:
-                self.progress.update_one(
-                    {"employerId": eid},
-                    {"$set": {"employerName": ename, "totalPages": number_of_pages,
-                              "status": "in_progress",
-                              "startedAt": datetime.now(timezone.utc),
-                              "updatedAt": datetime.now(timezone.utc)},
-                     "$setOnInsert": {"donePages": [], "failedPages": [],
-                                      "collected": 0}},
-                    upsert=True,
-                )
+                self._upsert_progress(eid, ename, number_of_pages)
                 if number_of_pages == 0 or not reviews:
                     self._mark_employer_done(eid, "done_empty")
                     self.q.task_done()
@@ -281,53 +375,109 @@ class ParallelCollector:
 
             self._mark_page_done(eid, page, n_new)
 
-            prog = self.progress.find_one({"employerId": eid},
-                                          {"donePages": 1, "totalPages": 1,
-                                           "failedPages": 1})
-            if prog:
-                tp = prog.get("totalPages") or 0
-                done_set = set(prog.get("donePages") or [])
-                fail_set = set(prog.get("failedPages") or [])
-                if tp > 0 and len(done_set | fail_set) >= tp:
-                    st = "done" if not fail_set else "done_with_errors"
-                    self._mark_employer_done(eid, st)
+            # 检查是否已完成全部页
+            if n_new == 0 and number_of_pages > 0:
+                conn = get_conn()
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """SELECT done_pages, failed_pages, total_pages
+                               FROM review_progress WHERE employer_id = %s""",
+                            (eid,))
+                        row = cur.fetchone()
+                finally:
+                    put_conn(conn)
+                if row:
+                    done_set = set(row[0] or [])
+                    fail_set = set(row[1] or [])
+                    tp = row[2] or 0
+                    if tp > 0 and len(done_set | fail_set) >= tp:
+                        st = "done" if not fail_set else "done_with_errors"
+                        self._mark_employer_done(eid, st)
             self.q.task_done()
         flush()
 
+    # ------------------------------------------------------------------
+    # Seeder: 从 PG 读取雇主列表 + 断点续传
+    # ------------------------------------------------------------------
     def seeder(self):
-        in_prog = {p["employerId"]: p for p in self.progress.find(
-            {"status": "in_progress"},
-            {"employerId": 1, "donePages": 1, "totalPages": 1, "failedPages": 1})}
-        done_ids = set(self.progress.distinct(
-            "employerId", {"status": {"$in": ["done", "done_empty",
-                                              "done_with_errors"]}}))
+        # 获取 in_progress 的雇主
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT employer_id, done_pages, failed_pages, total_pages
+                       FROM review_progress WHERE status = 'in_progress'""")
+                in_prog = {row[0]: {
+                    "done_pages": row[1] or [], "failed_pages": row[2] or [],
+                    "total_pages": row[3] or 0} for row in cur.fetchall()}
+
+                cur.execute(
+                    """SELECT employer_id FROM review_progress
+                       WHERE status IN ('done', 'done_empty', 'done_with_errors')""")
+                done_ids = {row[0] for row in cur.fetchall()}
+        finally:
+            put_conn(conn)
+
         log.info("seeder: %d in_progress, %d done", len(in_prog), len(done_ids))
 
+        # 续传 in_progress
         for eid, p in in_prog.items():
-            tp = p.get("totalPages") or 0
-            have = set(p.get("donePages") or []) | set(p.get("failedPages") or [])
+            tp = p["total_pages"]
+            have = set(p["done_pages"]) | set(p["failed_pages"])
             missing = [pg for pg in range(1, tp + 1) if pg not in have]
             if not missing:
                 self._mark_employer_done(eid)
                 continue
-            ename = (self.employers.find_one({"employerId": eid},
-                                             {"shortName": 1}) or {}).get("shortName", "")
+
+            conn2 = get_conn()
+            try:
+                with conn2.cursor() as cur:
+                    cur.execute(
+                        "SELECT name FROM employers WHERE employer_id = %s", (eid,))
+                    row = cur.fetchone()
+                    ename = row[0] if row else ""
+            finally:
+                put_conn(conn2)
+
             for pg in missing:
                 self.q.put((eid, ename, pg, 0))
             log.info("seeder: resume eid=%s, %d missing pages", eid, len(missing))
 
+        # 新雇主：reviewCount > 0 且未完成
         log.info("seeder: loading employer list ...")
-        emp_list = list(self.employers.find(
-            {"reviewCount": {"$gt": 0}, "employerId": {"$nin": list(done_ids)}},
-            {"employerId": 1, "shortName": 1, "reviewCount": 1},
-        ).sort("reviewCount", -1))
+        if done_ids:
+            done_list = list(done_ids)
+            # 分批查询避免 IN 列表过大
+            conn3 = get_conn()
+            try:
+                with conn3.cursor() as cur:
+                    cur.execute(
+                        """SELECT employer_id, name FROM employers
+                           WHERE review_count > 0 AND employer_id != ALL(%s::int[])
+                           ORDER BY review_count DESC""",
+                        (done_list,))
+                    emp_list = [(row[0], row[1] or "") for row in cur.fetchall()]
+            finally:
+                put_conn(conn3)
+        else:
+            conn4 = get_conn()
+            try:
+                with conn4.cursor() as cur:
+                    cur.execute(
+                        """SELECT employer_id, name FROM employers
+                           WHERE review_count > 0
+                           ORDER BY review_count DESC""")
+                    emp_list = [(row[0], row[1] or "") for row in cur.fetchall()]
+            finally:
+                put_conn(conn4)
+
         log.info("seeder: %d employers to queue", len(emp_list))
         n_seed = 0
-        for emp in emp_list:
-            eid = emp["employerId"]
+        for eid, ename in emp_list:
             if eid in in_prog:
                 continue
-            self.q.put((eid, emp.get("shortName", ""), 1, 0))
+            self.q.put((eid, ename, 1, 0))
             n_seed += 1
             if n_seed % 5000 == 0:
                 log.info("seeder: %d employers queued ...", n_seed)
@@ -375,7 +525,15 @@ class ParallelCollector:
         log.info("=== ALL DONE === req=%d fail=%d reviews=%d employers=%d",
                  cur["req_ok"], cur["req_fail"], cur["reviews"],
                  cur["employers_done"])
-        log.info("DB reviews total: %d", self.reviews.count_documents({}))
+
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM reviews")
+                total = cur.fetchone()[0]
+            log.info("DB reviews total: %d", total)
+        finally:
+            put_conn(conn)
 
 
 def main():
@@ -384,7 +542,15 @@ def main():
         format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
     )
     c = ParallelCollector()
-    n_emp = c.employers.count_documents({"reviewCount": {"$gt": 0}})
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM employers WHERE review_count > 0")
+            n_emp = cur.fetchone()[0]
+    finally:
+        put_conn(conn)
+
     log.info("employers with reviews: %d", n_emp)
     log.info("workers=%d pageSize=%d rotator=%s nodes=%d current=%s",
              WORKERS, PAGE_SIZE, rotator.enabled, len(rotator.nodes),

@@ -6,23 +6,20 @@ import time
 from datetime import datetime, timezone
 
 import curl_cffi.requests as requests
-from pymongo import MongoClient, ASCENDING
 
 from .config import (
     CF_BM,
-    COLLECTION_EMPLOYERS,
-    DB_NAME,
     DEEP_TERMS,
     DELAY_BETWEEN_PAGES,
     DELAY_BETWEEN_TERMS,
     GD_ID,
     MAX_PAGES_CAP,
     MAX_PAGES_PER_TERM,
-    MONGO_URI,
     NUM_PER_PAGE,
     SINGLE_LETTER_MAX_PAGES,
     SINGLE_LETTER_TERMS,
 )
+from .db import get_conn, init_all_tables, put_conn
 
 SEARCH_COMPANIES_QUERY = (
     "query SearchCompanies($employerSearchInput: EmployerSearchInput) { "
@@ -47,17 +44,7 @@ log = logging.getLogger("discovery")
 
 class CompanyDiscoverer:
     def __init__(self):
-        self.client = MongoClient(MONGO_URI)
-        self.db = self.client[DB_NAME]
-        self.employers = self.db[COLLECTION_EMPLOYERS]
-        self.employers.create_index(
-            [("employerId", ASCENDING)], unique=True, background=True
-        )
-        # 断点续传：记录已完成的关键词 (term+phase 唯一)
-        self.progress = self.db["app_discovery_progress"]
-        self.progress.create_index(
-            [("key", ASCENDING)], unique=True, background=True
-        )
+        init_all_tables()
         self._gd_id = GD_ID
         self._cf_bm = CF_BM
         self._session = requests.Session()
@@ -106,17 +93,32 @@ class CompanyDiscoverer:
 
     def _term_done(self, phase: str, term: str) -> bool:
         key = f"{phase}:{term}"
-        return self.progress.find_one({"key": key}, {"_id": 1}) is not None
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM discovery_progress WHERE key = %s", (key,))
+                return cur.fetchone() is not None
+        finally:
+            put_conn(conn)
 
     def _mark_done(self, phase: str, term: str, new_count: int):
         key = f"{phase}:{term}"
-        self.progress.update_one(
-            {"key": key},
-            {"$set": {"key": key, "phase": phase, "term": term,
-                      "newCount": new_count,
-                      "doneAt": datetime.now(timezone.utc)}},
-            upsert=True,
-        )
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO discovery_progress (key, phase, term, new_count, done_at)
+                       VALUES (%s, %s, %s, %s, %s)
+                       ON CONFLICT (key) DO UPDATE SET
+                           phase = EXCLUDED.phase,
+                           term = EXCLUDED.term,
+                           new_count = EXCLUDED.new_count,
+                           done_at = EXCLUDED.done_at""",
+                    (key, phase, term, new_count, datetime.now(timezone.utc)))
+                conn.commit()
+        finally:
+            put_conn(conn)
 
     def run(self, terms: list[str] | None = None,
             max_pages: int = MAX_PAGES_PER_TERM,
@@ -175,37 +177,46 @@ class CompanyDiscoverer:
                         break
 
                     page_new = 0
+                    batch = []  # 批量 INSERT 的文档
                     for r in results:
                         emp = r.get("employer") or {}
                         eid = emp.get("id")
                         if not eid:
-                            continue
-                        if self.employers.find_one({"employerId": eid}, {"_id": 1}):
                             continue
 
                         ratings = r.get("employerRatings") or {}
                         counts = emp.get("counts") or {}
                         global_jobs = counts.get("globalJobCount") or {}
 
-                        doc = {
-                            "employerId": eid,
-                            "shortName": emp.get("shortName", ""),
-                            "name": emp.get("shortName", ""),
-                            "logoUrl": emp.get("squareLogoUrl"),
-                            "overallRating": ratings.get("overallRating"),
-                            "reviewCount": counts.get("reviewCount", 0),
-                            "salaryCount": counts.get("salaryCount", 0),
-                            "jobCount": global_jobs.get("jobCount", 0),
-                            "discoveredVia": term,
-                            "discoveredAt": datetime.now(timezone.utc),
-                        }
-                        res = self.employers.update_one(
-                            {"employerId": eid},
-                            {"$setOnInsert": doc},
-                            upsert=True,
-                        )
-                        if res.upserted_id is not None:
-                            page_new += 1
+                        batch.append((
+                            eid,
+                            emp.get("shortName", ""),
+                            emp.get("shortName", ""),
+                            emp.get("squareLogoUrl"),
+                            ratings.get("overallRating"),
+                            counts.get("reviewCount", 0),
+                            counts.get("salaryCount", 0),
+                            global_jobs.get("jobCount", 0),
+                            term,
+                            datetime.now(timezone.utc),
+                        ))
+
+                    if batch:
+                        conn = get_conn()
+                        try:
+                            with conn.cursor() as cur:
+                                cur.executemany(
+                                    """INSERT INTO employers (
+                                           employer_id, name, short_name, logo_url,
+                                           overall_rating, review_count, salary_count,
+                                           job_count, discovered_via, discovered_at
+                                       ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                       ON CONFLICT (employer_id) DO NOTHING""",
+                                    batch)
+                                page_new = cur.rowcount
+                                conn.commit()
+                        finally:
+                            put_conn(conn)
 
                     total_new += page_new
                     term_new += page_new
@@ -235,9 +246,27 @@ class CompanyDiscoverer:
         elapsed = time.time() - start_time
         log.info("=== DISCOVERY COMPLETE ===")
         log.info("Total new employers: %d", total_new)
-        log.info("DB total: %d", self.employers.count_documents({}))
+        db_total = 0
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM employers")
+                db_total = cur.fetchone()[0]
+        finally:
+            put_conn(conn)
+        log.info("DB total: %d", db_total)
         log.info("Elapsed: %.0fs (%.1fmin)", elapsed, elapsed / 60)
         return total_new
+
+
+def _count_employers() -> int:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM employers")
+            return cur.fetchone()[0]
+    finally:
+        put_conn(conn)
 
 
 def main():
@@ -246,7 +275,7 @@ def main():
         format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
     )
     d = CompanyDiscoverer()
-    before = d.employers.count_documents({})
+    before = _count_employers()
     log.info("=== Glassdoor Full Company Discovery ===")
     log.info("DB has %d employers before run", before)
 
@@ -255,14 +284,14 @@ def main():
              len(SINGLE_LETTER_TERMS), SINGLE_LETTER_MAX_PAGES)
     n1 = d.run(terms=SINGLE_LETTER_TERMS, max_pages=SINGLE_LETTER_MAX_PAGES,
                page_cap=SINGLE_LETTER_MAX_PAGES, phase="single_letter")
-    after1 = d.employers.count_documents({})
+    after1 = _count_employers()
     log.info("Phase 1 done: +%d new → DB total: %d", n1, after1)
 
     # Phase 2: 长关键词深挖 (no page limit)
     log.info("\n=== Phase 2: Deep keyword scan (%d terms, unlimited pages) ===",
              len(DEEP_TERMS))
     n2 = d.run(terms=DEEP_TERMS, max_pages=0, page_cap=99, phase="deep")
-    after2 = d.employers.count_documents({})
+    after2 = _count_employers()
     log.info("Phase 2 done: +%d new → DB total: %d", n2, after2)
 
     total_new = n1 + n2

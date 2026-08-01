@@ -5,16 +5,15 @@ description = "Glassdoor APP API 数据采集工具集 — 公司发现、评论
 requires-python = ">=3.11"
 dependencies = [
     "curl-cffi>=0.7.0",
-    "pymongo>=4.0",
     "requests>=2.31",
     "psycopg2-binary>=2.9",
 ]
 
 [project.scripts]
+glassdoor-initdb = "glassdoor_collector.db:main"
 glassdoor-discover = "glassdoor_collector.discover:main"
 glassdoor-collect = "glassdoor_collector.parallel:main"
 glassdoor-modules = "glassdoor_collector.modules:main"
-glassdoor-migrate = "glassdoor_collector.migrate:main"
 
 [tool.uv]
 package = true

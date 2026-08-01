@@ -1,14 +1,13 @@
 # Glassdoor Collector
 
-Glassdoor APP API 数据采集工具集，通过逆向 Android APP 的 GraphQL 端点，实现公司发现、评论采集、福利/面试/岗位采集的全链路自动化。
+Glassdoor APP API 数据采集工具集，通过逆向 Android APP 的 GraphQL 端点，实现公司发现、评论采集、福利/面试/岗位采集的全链路自动化，数据存储至 PostgreSQL。
 
 ## 环境准备
 
 | 依赖 | 说明 |
 |------|------|
 | Python >= 3.11 | 运行时 |
-| MongoDB | 主存储（公司/评论/福利/面试/岗位/进度） |
-| PostgreSQL | 迁移目标（可选，仅 glassdoor-migrate 需要） |
+| PostgreSQL | 主存储（公司/评论/福利/面试/岗位/进度） |
 | FlClash / mihomo | 代理节点池 + 自动轮换（可选，无代理时直连） |
 
 ## 安装
@@ -21,10 +20,10 @@ uv sync
 `uv sync` 会自动构建 `glassdoor_collector` 包并注册 4 个 CLI 入口：
 
 ```
-glassdoor-discover    →  公司发现
-glassdoor-collect     →  并行评论采集
-glassdoor-modules     →  模块采集 (benefits/interviews/jobs)
-glassdoor-migrate     →  MongoDB → PostgreSQL 迁移
+glassdoor-initdb     →  初始化 PostgreSQL 数据库表
+glassdoor-discover   →  公司发现
+glassdoor-collect    →  并行评论采集
+glassdoor-modules    →  模块采集 (benefits/interviews/jobs)
 ```
 
 ## 配置
@@ -34,10 +33,7 @@ glassdoor-migrate     →  MongoDB → PostgreSQL 迁移
 ### 数据库
 
 ```bash
-# MongoDB（所有采集模块共用）
-export MONGO_URI="mongodb://localhost:27017"
-
-# PostgreSQL（仅 glassdoor-migrate 需要）
+# PostgreSQL（主存储，所有模块共用）
 export PG_HOST="localhost"
 export PG_PORT="5432"
 export PG_USER="postgres"
@@ -65,12 +61,20 @@ export CLASH_SECRET="glassdoor123"           # Clash 密钥
 |------|--------|------|
 | `PARALLEL_WORKERS` | 8 | 评论采集并发数 |
 | `PARALLEL_PAGE_SIZE` | 100 | 每页评论数（服务端上限） |
-| `PARALLEL_FLUSH_SIZE` | 500 | 每批写入 MongoDB 的评论数 |
+| `PARALLEL_FLUSH_SIZE` | 500 | 每批写入 PostgreSQL 的评论数 |
 | `ROTATE_AFTER` | 250 | 同一 IP 最大请求数 |
 | `BAN_COOLDOWN` | 15min | 429/403 后节点冷却时间 |
 | `MODULES_WORKERS` | 4 | 模块采集并发数 |
 
 ## 完整启动流程
+
+### Step 0：初始化数据库
+
+```bash
+uv run glassdoor-initdb
+```
+
+首次部署时执行一次，创建所有表 + 索引。各模块启动时也会自动建表（幂等）。
 
 ### Step 1：启动代理（可选）
 
@@ -79,9 +83,17 @@ export CLASH_SECRET="glassdoor123"           # Clash 密钥
 curl http://127.0.0.1:9090/version
 ```
 
-### Step 2：公司发现
+### Step 2：导入公司数据
 
-扫描 Glassdoor APP API 收录的全部公司，写入 MongoDB `app_employers` 集合。
+将已有的 45 万公司数据导入 PostgreSQL `employers` 表：
+
+```sql
+-- 使用 COPY 或其他导入方式将公司数据写入 employers 表
+```
+
+### Step 3：公司发现（扩展公司列表）
+
+扫描 Glassdoor APP API 收录的公司，写入 PostgreSQL `employers` 表。
 
 ```bash
 uv run glassdoor-discover
@@ -92,9 +104,7 @@ uv run glassdoor-discover
 - Phase 2：41 个行业关键词深挖，补齐单字母漏掉的非英文名公司
 - 断点续传：已完成的 (phase, term) 不重复扫描
 
-当前数据库已有 456,625 家公司，二次运行会跳过全部已完成关键词。
-
-### Step 3：并行评论采集
+### Step 4：并行评论采集
 
 以 8 线程并发采集所有有评论的公司的评论。
 
@@ -105,7 +115,7 @@ uv run glassdoor-collect
 **特性：**
 - pageSize=100（服务端上限），请求量是旧版的 1/5
 - 令牌桶限速（起始 3 req/s），遇到 429 自动降速，正常时自动回升
-- 断点续跑：`app_review_progress` 按 `(employerId, donePages)` 记录，Ctrl+C 后重跑不丢进度
+- 断点续跑：`review_progress` 按 `(employer_id, done_pages)` 记录，Ctrl+C 后重跑不丢进度
 - 节点轮换：每 250 请求自动切代理节点，429/403 立即封禁当前节点
 - TLS 指纹轮换：每 200 请求切换 curl-cffi impersonate 指纹
 
@@ -117,7 +127,7 @@ STATS req=361 fail=0 pages=361 reviews=34545 emp_done=1 |
   fp=chrome124 | node=🇯🇵 日本6-VIP88a#114 ban=0 | elapsed 0.0h
 ```
 
-### Step 4：模块采集
+### Step 5：模块采集
 
 采集公司福利评价、面试经验、招聘岗位。
 
@@ -132,32 +142,26 @@ uv run glassdoor-modules --modules interviews --workers 4
 uv run glassdoor-modules --modules jobs --max-employers 10 --workers 1
 ```
 
-| 模块 | 数据写入集合 | 说明 |
-|------|-------------|------|
-| benefits | `app_benefits` | 福利评价 + overview（美国优先，fallback 其他地区） |
-| interviews | `app_interviews` | 面试经验（难度/结果/问题） |
-| jobs | `app_jobs` | 公司热门岗位（SERP 子集，非全量） |
+| 模块 | 数据写入表 | 说明 |
+|------|-----------|------|
+| benefits | `benefits` | 福利评价 + overview（美国优先，fallback 其他地区） |
+| interviews | `interviews` | 面试经验（难度/结果/问题） |
+| jobs | `jobs` | 公司热门岗位（SERP 子集，非全量） |
 
-### Step 5：PostgreSQL 迁移
+## 数据库表结构
 
-将 MongoDB `app_employers` 批量迁移到 PostgreSQL。
-
-```bash
-uv run glassdoor-migrate
-```
-
-**特性：**
-- 自动建表（`CREATE TABLE IF NOT EXISTS`）
-- 批量 UPSERT（每 2000 条一批），新增/更新可区分
-- 迁移完成后校验行数一致性
-
-## 数据规模
-
-| 数据集 | 当前数量 |
-|--------|---------|
-| 公司 (MongoDB) | 456,625 |
-| 公司 (PostgreSQL) | 456,625 |
-| 评论 (MongoDB) | 369,930+ |
+| 表名 | 说明 |
+|------|------|
+| `employers` | 公司信息 |
+| `discovery_progress` | 公司发现进度 |
+| `reviews` | 评论数据 |
+| `review_progress` | 评论采集进度 |
+| `benefits` | 福利评价 |
+| `benefits_progress` | 福利采集进度 |
+| `interviews` | 面试经验 |
+| `interviews_progress` | 面试采集进度 |
+| `jobs` | 招聘岗位 |
+| `jobs_progress` | 岗位采集进度 |
 
 ## 项目结构
 
@@ -165,15 +169,14 @@ uv run glassdoor-migrate
 glassdoor/
 ├── glassdoor_collector/     # 核心包
 │   ├── config.py            # 统一配置（所有参数集中管理）
+│   ├── db.py                # PG 连接池 + 表 DDL + initdb CLI
 │   ├── __init__.py
 │   ├── clash.py             # FlClash 控制器
 │   ├── infra.py             # 基础设施（限速/节点/指纹/GraphQL）
 │   ├── discover.py          # 公司发现（单字母 + 关键词）
 │   ├── parallel.py          # 并行评论采集（推荐）
 │   ├── collector.py         # 单线程评论采集（legacy）
-│   ├── modules.py           # Benefits/Interviews/Jobs
-│   └── migrate.py           # MongoDB → PostgreSQL 迁移
-├── tests/                   # 测试
+│   └── modules.py           # Benefits/Interviews/Jobs
 ├── pyproject.toml
 └── README.md
 ```
