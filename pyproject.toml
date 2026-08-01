@@ -1,13 +1,30 @@
 [project]
 name = "glassdoor-collector"
 version = "1.0.0"
-description = "Glassdoor 并行评论采集器 — APP API 反限流采集"
+description = "Glassdoor APP API 数据采集工具集 — 公司发现、评论采集、福利/面试/岗位采集"
 requires-python = ">=3.11"
 dependencies = [
     "curl-cffi>=0.7.0",
     "pymongo>=4.0",
     "requests>=2.31",
+    "psycopg2-binary>=2.9",
 ]
 
+[project.scripts]
+glassdoor-discover = "glassdoor_collector.discover:main"
+glassdoor-collect = "glassdoor_collector.parallel:main"
+glassdoor-modules = "glassdoor_collector.modules:main"
+glassdoor-migrate = "glassdoor_collector.migrate:main"
+
 [tool.uv]
-dev-dependencies = []
+package = true
+
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["glassdoor_collector*"]
+
+[dependency-groups]
+dev = []

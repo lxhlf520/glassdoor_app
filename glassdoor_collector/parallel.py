@@ -19,7 +19,7 @@ from typing import Any
 from pymongo import MongoClient, ASCENDING, InsertOne
 from pymongo.errors import BulkWriteError
 
-from collector_infra import (
+from .infra import (
     DB_NAME, fp_rotator, rate_limiter, rotator, fetch_graphql,
     mongo_client,
 )
