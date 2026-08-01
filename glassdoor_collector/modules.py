@@ -33,6 +33,7 @@ from .config import (
     MODULES_WORKERS as WORKERS,
 )
 from .db import get_conn, init_all_tables, put_conn
+from psycopg2.extras import execute_values
 
 log = logging.getLogger("modules")
 
@@ -565,7 +566,7 @@ class BaseModuleCollector:
             conn = get_conn()
             try:
                 with conn.cursor() as cur:
-                    cur.executemany(
+                    execute_values(cur,
                         f"""INSERT INTO {self.out_table} ({', '.join(self.columns)})
                             VALUES %s
                             ON CONFLICT DO NOTHING""",
