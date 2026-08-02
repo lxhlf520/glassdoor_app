@@ -52,7 +52,9 @@ def get_conn():
     conn = pool.getconn()
     # 检查连接是否存活，死了就重建
     try:
-        conn.cursor().execute("SELECT 1")
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        conn.rollback()  # 清除健康检查产生的事务
     except Exception:
         log.warning("stale PG connection, reconnecting")
         try:
