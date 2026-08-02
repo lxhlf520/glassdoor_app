@@ -23,6 +23,8 @@ from .config import (
     TUNNEL_PROXY_URL,
 )
 
+log = logging.getLogger("collector.infra")
+
 # 隧道代理模式：跳过 Clash 节点轮换
 TUNNEL_MODE = bool(TUNNEL_PROXY_URL)
 ACTIVE_PROXY = TUNNEL_PROXY_URL if TUNNEL_MODE else PROXY_URL
@@ -36,7 +38,6 @@ else:
 ALIVE_NODES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "_alive_nodes.json")
 
-log = logging.getLogger("collector.infra")
 _tls = threading.local()
 
 
