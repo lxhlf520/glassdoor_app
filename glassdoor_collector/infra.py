@@ -20,9 +20,18 @@ from .config import (
     FP_ROTATE_AFTER,
     PROXY_URL,
     ROTATE_AFTER,
+    TUNNEL_PROXY_URL,
 )
 
-PROXIES = {"http": PROXY_URL, "https": PROXY_URL}
+# 隧道代理模式：跳过 Clash 节点轮换
+TUNNEL_MODE = bool(TUNNEL_PROXY_URL)
+ACTIVE_PROXY = TUNNEL_PROXY_URL if TUNNEL_MODE else PROXY_URL
+PROXIES = {"http": ACTIVE_PROXY, "https": ACTIVE_PROXY}
+
+if TUNNEL_MODE:
+    log.info("Tunnel proxy mode: %s", ACTIVE_PROXY)
+else:
+    log.info("Clash proxy mode: %s", ACTIVE_PROXY)
 
 ALIVE_NODES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "_alive_nodes.json")
@@ -38,7 +47,7 @@ class RateLimiter:
     def __init__(self, rate: float):
         self._rate = rate
         self._min_rate = 0.5
-        self._max_rate = 3.0
+        self._max_rate = max(rate, 20.0)  # 允许 ramp up 到初始速率或 20
         self._tokens = rate
         self._capacity = max(rate * 2, 4)
         self._last = time.monotonic()
@@ -106,8 +115,11 @@ class NodeRotator:
         self.banned_ips = {}
         self.last_rotate = 0.0
         self.pending_429 = 0
-        self.enabled = bool(self.nodes) and self.api.alive()
+        # 隧道模式下禁用节点轮换
+        self.enabled = bool(self.nodes) and self.api.alive() and not TUNNEL_MODE
         self.pause_until = 0.0  # 429 切节点后全局暂停截止时间
+        if TUNNEL_MODE:
+            self.current = "tunnel"
 
     def _load_nodes(self) -> list:
         nodes = []
@@ -131,6 +143,9 @@ class NodeRotator:
                 self._rotate_locked("proactive")
 
     def on_429(self):
+        if not self.enabled:
+            log.warning("429 on %s, tunnel mode - slowing down", self.current)
+            return
         with self.lock:
             if time.time() - self.last_rotate < 10:
                 return
@@ -143,6 +158,8 @@ class NodeRotator:
         self._ban_and_rotate("429")
 
     def on_403(self):
+        if not self.enabled:
+            return
         self._ban_and_rotate("403")
 
     def on_ok(self):
@@ -228,7 +245,8 @@ class FPRotator:
 # ---------------------------------------------------------------------------
 # 全局实例
 # ---------------------------------------------------------------------------
-rate_limiter = RateLimiter(rate=3.0)
+# 隧道模式限速 20 req/s，Clash 模式 3 req/s
+rate_limiter = RateLimiter(rate=20.0 if TUNNEL_MODE else 3.0)
 rotator = NodeRotator()
 fp_rotator = FPRotator(FP_POOL, FP_ROTATE_AFTER)
 

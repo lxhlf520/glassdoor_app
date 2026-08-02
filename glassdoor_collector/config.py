@@ -27,8 +27,11 @@ PG_CONFIG = {
 # ============================================================================
 PROXY_URL = os.environ.get("CLASH_MIXED", "http://127.0.0.1:7890")
 
-ROTATE_AFTER = 150              # 每 IP 请求数上限
-BAN_COOLDOWN = 15 * 60          # 429/403 后节点冷却秒数
+# 隧道代理（设置后自动跳过 Clash 节点轮换，直接使用隧道）
+TUNNEL_PROXY_URL = os.environ.get("TUNNEL_PROXY_URL", "")
+
+ROTATE_AFTER = 150              # 每 IP 请求数上限（Clash 模式）
+BAN_COOLDOWN = 15 * 60          # 429/403 后节点冷却秒数（Clash 模式）
 
 FP_POOL = [
     "chrome110", "chrome120", "chrome124", "chrome131", "chrome133a",
@@ -113,7 +116,7 @@ PARALLEL_STATS_INTERVAL = 30
 # ============================================================================
 # 模块采集器 (modules)
 # ============================================================================
-MODULES_WORKERS = 4
+MODULES_WORKERS = int(os.environ.get("MODULES_WORKERS", "20"))
 MODULES_FLUSH_SIZE = 200
 MODULES_STATS_INTERVAL = 30
 MODULES_MAX_PAGES_PER_EMPLOYER = 3000
