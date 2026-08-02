@@ -16,6 +16,10 @@ PG_CONFIG = {
     "user": os.environ.get("PG_USER", "postgres"),
     "password": os.environ.get("PG_PASSWORD", "long123456"),
     "dbname": os.environ.get("PG_DBNAME", "glassdoor"),
+    "keepalives": 1,
+    "keepalives_idle": 30,
+    "keepalives_interval": 10,
+    "keepalives_count": 3,
 }
 
 # ============================================================================

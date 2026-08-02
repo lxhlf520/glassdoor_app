@@ -47,8 +47,21 @@ def close_pool():
 
 
 def get_conn():
-    """上下文管理器：从连接池获取连接，退出时归还。"""
-    return get_pool().getconn()
+    """从连接池获取连接，自动丢弃断开的死连接。"""
+    pool = get_pool()
+    conn = pool.getconn()
+    # 检查连接是否存活，死了就重建
+    try:
+        conn.cursor().execute("SELECT 1")
+    except Exception:
+        log.warning("stale PG connection, reconnecting")
+        try:
+            conn.close()
+        except Exception:
+            pass
+        pool.putconn(conn, close=True)
+        conn = pool.getconn()
+    return conn
 
 
 def put_conn(conn):
