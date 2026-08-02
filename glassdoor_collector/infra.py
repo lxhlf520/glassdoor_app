@@ -107,6 +107,7 @@ class NodeRotator:
         self.last_rotate = 0.0
         self.pending_429 = 0
         self.enabled = bool(self.nodes) and self.api.alive()
+        self.pause_until = 0.0  # 429 切节点后全局暂停截止时间
 
     def _load_nodes(self) -> list:
         nodes = []
@@ -148,6 +149,12 @@ class NodeRotator:
         with self.lock:
             self.pending_429 = 0
 
+    def wait_if_paused(self):
+        """429 切节点后全局暂停，等新节点生效再发请求。"""
+        wait = self.pause_until - time.time()
+        if wait > 0:
+            time.sleep(wait)
+
     def _ban_and_rotate(self, reason: str):
         with self.lock:
             now = time.time()
@@ -184,6 +191,7 @@ class NodeRotator:
             self.current = node
             self.req_count = 0
             self.last_rotate = time.time()
+            self.pause_until = time.time() + 5  # 切节点后暂停 5s 等新节点生效
             return
         wake = min(list(self.banned_nodes.values()) + [time.time() + 120])
         wait = max(30, wake - time.time() + 5)
@@ -258,6 +266,8 @@ def headers(operation: str) -> dict:
 # ---------------------------------------------------------------------------
 def fetch_graphql(operation: str, body: dict, timeout: int = 60) -> tuple[int, dict]:
     """返回 (status, data)。status: 200 ok / -1 永久失败 / 0 网络或 HTTP 错误"""
+    # 429 切节点后等待，避免重试风暴打爆新节点
+    rotator.wait_if_paused()
     body["extensions"] = {"clientLibrary": {"name": "apollo-kotlin", "version": "4.4.3"}}
     try:
         rotator.on_request()

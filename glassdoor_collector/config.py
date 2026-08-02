@@ -27,7 +27,7 @@ PG_CONFIG = {
 # ============================================================================
 PROXY_URL = os.environ.get("CLASH_MIXED", "http://127.0.0.1:7890")
 
-ROTATE_AFTER = 250              # 每 IP 请求数上限
+ROTATE_AFTER = 150              # 每 IP 请求数上限
 BAN_COOLDOWN = 15 * 60          # 429/403 后节点冷却秒数
 
 FP_POOL = [
