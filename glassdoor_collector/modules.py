@@ -588,14 +588,16 @@ class BaseModuleCollector:
             if len(buf) >= FLUSH_SIZE:
                 flush()
 
-        while not self.stop_flag.is_set():
+        while True:
             try:
                 task = self.q.get(timeout=5)
             except queue.Empty:
                 flush()
-                if self.stop_flag.is_set():
-                    return
                 continue
+            if task is None:  # sentinel: seeder 发完后的退出信号
+                self.q.task_done()
+                flush()
+                return
             try:
                 status = self.collect_employer(task, add_doc)
             except Exception as e:
@@ -632,17 +634,29 @@ class BaseModuleCollector:
     def run(self):
         threads = []
         for w in range(self.workers):
-            t = threading.Thread(target=self.worker, args=(w,), daemon=True)
+            t = threading.Thread(target=self.worker, args=(w,))
             t.start()
             threads.append(t)
         st = threading.Thread(target=self.stats_loop, daemon=True)
         st.start()
 
         self.seeder()
-        self.q.join()
-        self.stop_flag.set()
+        # sentinel: 每个 worker 发一个 None 作为退出信号
+        for _ in range(self.workers):
+            self.q.put(None)
+
+        # 等待 worker 线程退出（最长等 5 分钟防死锁）
+        deadline = time.time() + 300
         for t in threads:
-            t.join(timeout=10)
+            remaining = deadline - time.time()
+            if remaining > 0:
+                t.join(timeout=remaining)
+        self.stop_flag.set()
+        # 如果还有 worker 没退（异常卡死），强制忽略
+        alive = [t for t in threads if t.is_alive()]
+        if alive:
+            log.warning("%d workers still alive after timeout, continuing",
+                        len(alive))
 
         with _stats_lock:
             cur = dict(_stats)
