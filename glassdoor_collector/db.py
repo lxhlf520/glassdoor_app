@@ -230,7 +230,6 @@ CREATE TABLE IF NOT EXISTS interviews_progress (
     collected     INTEGER DEFAULT 0,
     failed_pages  INTEGER[] DEFAULT '{}'::int[],
     status        TEXT DEFAULT 'in_progress',
-    ctx           JSONB DEFAULT '{}'::jsonb,
     started_at    TIMESTAMPTZ,
     done_at       TIMESTAMPTZ,
     updated_at    TIMESTAMPTZ DEFAULT NOW()
@@ -309,7 +308,7 @@ _init_lock = threading.Lock()
 
 
 def init_all_tables():
-    """首次调用时创建所有表 + 索引 + 迁移。可安全重复调用。"""
+    """首次调用时创建所有表 + 索引。可安全重复调用。"""
     global _inited
     if _inited:
         return
@@ -322,13 +321,7 @@ def init_all_tables():
             with conn.cursor() as cur:
                 for ddl in ALL_DDL:
                     cur.execute(ddl)
-            # 迁移：补上旧表缺失的 ctx 列
-            with conn.cursor() as cur:
-                cur.execute(
-                    "ALTER TABLE interviews_progress "
-                    "ADD COLUMN IF NOT EXISTS ctx JSONB DEFAULT '{}'::jsonb"
-                )
-            log.info("All tables initialized (migrations checked).")
+            log.info("All tables initialized.")
         finally:
             put_conn(conn)
         _inited = True
