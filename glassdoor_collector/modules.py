@@ -576,7 +576,26 @@ class BaseModuleCollector:
                     with _stats_lock:
                         _stats["docs"] += inserted
             except Exception as e:
-                log.warning("[w%d] flush error: %s", wid, str(e)[:100])
+                log.warning("[w%d] batch flush error (%d rows): %s",
+                            wid, len(rows), str(e)[:200])
+                conn.rollback()
+                # 逐行重试，定位问题行
+                ok = 0
+                for r in rows:
+                    try:
+                        with conn.cursor() as cur:
+                            execute_values(cur,
+                                f"""INSERT INTO {self.out_table} ({', '.join(self.columns)})
+                                    VALUES %s
+                                    ON CONFLICT DO NOTHING""",
+                                [r])
+                            conn.commit()
+                            ok += 1
+                    except Exception as e2:
+                        conn.rollback()
+                        log.warning("[w%d] bad row: %s", wid, str(r)[:300])
+                with _stats_lock:
+                    _stats["docs"] += ok
             finally:
                 buf.clear()
                 put_conn(conn)
