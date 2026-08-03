@@ -260,7 +260,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     pay_p90                  REAL,
     rating                   REAL,
     salary_source            TEXT,
-    goc                      INTEGER,
+    goc                      TEXT,
     job_view_url             TEXT,
     employer_name_from_search TEXT,
     employer_logo_url        TEXT,
@@ -326,6 +326,12 @@ def init_all_tables():
                 cur.execute(
                     "ALTER TABLE interviews_progress "
                     "ADD COLUMN IF NOT EXISTS ctx JSONB DEFAULT '{}'::jsonb"
+                )
+            # 迁移：goc 从 INTEGER 改为 TEXT（API 现在返回字符串）
+            with conn.cursor() as cur:
+                cur.execute(
+                    "ALTER TABLE jobs "
+                    "ALTER COLUMN goc TYPE TEXT"
                 )
             log.info("All tables initialized (migrations checked).")
         finally:
