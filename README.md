@@ -43,15 +43,19 @@ export PG_DBNAME="glassdoor"
 
 ### 代理（可选）
 
-如果使用 FlClash/mihomo 代理池：
-
-```bash
-export CLASH_MIXED="http://127.0.0.1:7890"   # 代理端口
-export CLASH_BASE="http://127.0.0.1:9090"    # Clash API
-export CLASH_SECRET="glassdoor123"           # Clash 密钥
+**隧道代理（推荐，按请求数计费，每请求换 IP）：**
+```cmd
+set "TUNNEL_PROXY_URL=http://Ub3T81buEu:Rz39uKOMBH@tunnel.proxy.lthttp.com:9001"
 ```
+设置后自动跳过 Clash 节点轮换，限速 20 req/s。
 
-不设置代理时，采集器会直连 `api.glassdoor.com`。
+**Clash 代理池（备选）：**
+```cmd
+set CLASH_MIXED=http://127.0.0.1:7890
+set CLASH_BASE=http://127.0.0.1:9090
+set CLASH_SECRET=glassdoor123
+```
+不设置任何代理时，采集器直连 `api.glassdoor.com`。
 
 ### 运行参数调整
 
@@ -66,11 +70,70 @@ export CLASH_SECRET="glassdoor123"           # Clash 密钥
 | `BAN_COOLDOWN` | 15min | 429/403 后节点冷却时间 |
 | `MODULES_WORKERS` | 4 | 模块采集并发数 |
 
+## Windows CMD 部署命令
+
+> ⚠️ 远端 Windows Server 使用 CMD，非 PowerShell。环境变量用 `set VAR=value`，赋值含特殊字符时用双引号包裹：`set "VAR=value"`。
+
+### 前置：设置代理 + 拉代码
+
+```cmd
+cd C:\Users\sver1\Desktop\lxh\glassdoor_app
+git pull
+set "TUNNEL_PROXY_URL=http://Ub3T81buEu:Rz39uKOMBH@tunnel.proxy.lthttp.com:9001"
+```
+
+### 数据库初始化（首次部署）
+
+```cmd
+uv run glassdoor-initdb
+```
+
+### 公司发现
+
+```cmd
+uv run glassdoor-discover
+```
+
+### 评论采集
+
+```cmd
+uv run glassdoor-collect
+```
+
+### 模块采集
+
+```cmd
+:: 全部按顺序跑（benefits → interviews → jobs）
+uv run glassdoor-modules --modules all
+
+:: 分模块跑
+uv run glassdoor-modules --modules benefits
+uv run glassdoor-modules --modules interviews
+uv run glassdoor-modules --modules jobs
+
+:: 自定义并发数（默认 20）
+uv run glassdoor-modules --modules jobs --workers 10
+
+:: 测试：只采 10 家公司
+uv run glassdoor-modules --modules jobs --max-employers 10 --workers 1
+
+:: 采集全部公司（含 reviewCount=0）
+uv run glassdoor-modules --modules jobs --all-employers
+```
+
+### 测试脚本
+
+```cmd
+:: 快速验证各模块 API 是否正常
+set "TUNNEL_PROXY_URL=http://Ub3T81buEu:Rz39uKOMBH@tunnel.proxy.lthttp.com:9001"
+python _test_modules.py
+```
+
 ## 完整启动流程
 
 ### Step 0：初始化数据库
 
-```bash
+```cmd
 uv run glassdoor-initdb
 ```
 
@@ -78,24 +141,19 @@ uv run glassdoor-initdb
 
 ### Step 1：启动代理（可选）
 
-```bash
-# 启动 FlClash，确认 API 可达
-curl http://127.0.0.1:9090/version
+```cmd
+set "TUNNEL_PROXY_URL=http://Ub3T81buEu:Rz39uKOMBH@tunnel.proxy.lthttp.com:9001"
 ```
 
 ### Step 2：导入公司数据
 
-将已有的 45 万公司数据导入 PostgreSQL `employers` 表：
-
-```sql
--- 使用 COPY 或其他导入方式将公司数据写入 employers 表
-```
+将已有的公司数据导入 PostgreSQL `employers` 表。
 
 ### Step 3：公司发现（扩展公司列表）
 
 扫描 Glassdoor APP API 收录的公司，写入 PostgreSQL `employers` 表。
 
-```bash
+```cmd
 uv run glassdoor-discover
 ```
 
@@ -108,7 +166,7 @@ uv run glassdoor-discover
 
 以 8 线程并发采集所有有评论的公司的评论。
 
-```bash
+```cmd
 uv run glassdoor-collect
 ```
 
@@ -131,14 +189,14 @@ STATS req=361 fail=0 pages=361 reviews=34545 emp_done=1 |
 
 采集公司福利评价、面试经验、招聘岗位。
 
-```bash
-# 全部三个模块
+```cmd
+:: 全部三个模块
 uv run glassdoor-modules --modules all
 
-# 仅采集面试
+:: 仅采集面试
 uv run glassdoor-modules --modules interviews --workers 4
 
-# 测试：只采 10 家公司岗位
+:: 测试：只采 10 家公司岗位
 uv run glassdoor-modules --modules jobs --max-employers 10 --workers 1
 ```
 
