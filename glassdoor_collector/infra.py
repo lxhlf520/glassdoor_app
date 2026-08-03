@@ -38,7 +38,10 @@ else:
 ALIVE_NODES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "_alive_nodes.json")
 
-_tls = threading.local()
+# 全局 curl session 池（非线程本地），避免 20 worker 各创建独立 session
+# 导致隧道代理并发 TCP 连接数爆炸（curl 604 CONNECT tunnel failed）
+_sessions: dict[str, curl_requests.Session] = {}
+_sessions_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -253,12 +256,13 @@ fp_rotator = FPRotator(FP_POOL, FP_ROTATE_AFTER)
 
 
 def get_session(fp: str):
-    if not hasattr(_tls, "sessions"):
-        _tls.sessions = {}
-    if fp not in _tls.sessions:
-        _tls.sessions[fp] = curl_requests.Session(impersonate=fp)
-        _tls.sessions[fp].proxies = PROXIES
-    return _tls.sessions[fp]
+    if fp not in _sessions:
+        with _sessions_lock:
+            if fp not in _sessions:
+                s = curl_requests.Session(impersonate=fp)
+                s.proxies = PROXIES
+                _sessions[fp] = s
+    return _sessions[fp]
 
 
 def headers(operation: str) -> dict:
