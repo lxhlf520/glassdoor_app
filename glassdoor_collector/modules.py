@@ -16,6 +16,7 @@ import argparse
 import json
 import logging
 import queue
+import random
 import threading
 import time
 from datetime import datetime, timezone
@@ -219,6 +220,8 @@ def fetch_module_page(operation: str, body: dict, employer_id: int,
     for attempt in range(retries + 1):
         rate_limiter.acquire()
         rate_limiter.maybe_ramp_up()
+        # 请求前随机抖动 0-300ms，分散并发连接，减轻隧道代理压力
+        time.sleep(random.random() * 0.3)
         status, data = fetch_graphql(operation, body, timeout=60)
         if status == 200:
             with _stats_lock:
@@ -232,7 +235,8 @@ def fetch_module_page(operation: str, body: dict, employer_id: int,
         log.warning("retry op=%s eid=%s attempt=%d status=%s",
                     operation, employer_id, attempt, status)
         if attempt < retries:
-            time.sleep(min(2 ** attempt, 30))
+            # jitter 打散重试风暴：避免所有 worker 同步重试
+            time.sleep(min(2 ** attempt, 30) + random.random() * 0.5)
     return 0, {}
 
 
