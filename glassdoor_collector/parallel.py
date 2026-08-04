@@ -15,6 +15,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+from psycopg2.extras import execute_values
+
 from .infra import (
     fp_rotator, rate_limiter, rotator, fetch_graphql,
     invalidate_session,
@@ -334,9 +336,10 @@ class ParallelCollector:
             conn = get_conn()
             try:
                 with conn.cursor() as cur:
-                    cur.executemany(
-                        """INSERT INTO reviews (%s) VALUES %%s
-                           ON CONFLICT (review_id) DO NOTHING""" % ", ".join(REVIEW_COLUMNS),
+                    execute_values(cur,
+                        f"""INSERT INTO reviews ({', '.join(REVIEW_COLUMNS)})
+                            VALUES %s
+                            ON CONFLICT (review_id) DO NOTHING""",
                         rows)
                     inserted = cur.rowcount
                     conn.commit()

@@ -280,11 +280,15 @@ def fetch_module_page(operation: str, body: dict, employer_id: int,
         # 请求前随机抖动 0-300ms，分散并发连接，减轻隧道代理压力
         time.sleep(random.random() * 0.3)
         status, data = fetch_graphql(operation, body, timeout=60)
-        if status == 200:
+        if status == 200 and not data.get("errors"):
             with _stats_lock:
                 _stats["req_ok"] += 1
             _note_ok()
             return 200, data
+        if data.get("errors"):
+            err_msg = data["errors"][0].get("message", "unknown")[:80]
+            log.warning("GraphQL error op=%s eid=%s attempt=%d: %s",
+                        operation, employer_id, attempt, err_msg)
         with _stats_lock:
             _stats["req_fail"] += 1
         if status == -1:
@@ -770,7 +774,7 @@ class BenefitsCollector(BaseModuleCollector):
     progress_table = "benefits_progress"
     columns = BENEFIT_COLUMNS
     doc_to_row = staticmethod(_benefit_doc_to_row)
-    page_size = 10000
+    page_size = 1000  # 10000 未验证稳定性，用安全值
     operation = "EmployerBenefits"
     id_field_name = "benefitReviewId"
 
@@ -1001,7 +1005,7 @@ class InterviewsCollector(BaseModuleCollector):
     progress_table = "interviews_progress"
     columns = INTERVIEW_COLUMNS
     doc_to_row = staticmethod(_interview_doc_to_row)
-    page_size = 5000
+    page_size = 1000  # 5000 会对部分employer触发INTERNAL错误
     operation = "EmployerInterviewsList"
     id_field_name = "interviewId"
 
