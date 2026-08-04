@@ -32,11 +32,18 @@ from .config import (
 from .db import get_conn, init_all_tables, put_conn
 
 REVIEWS_QUERY = (
-    "query EmployerReviewsData($employerId: Int!, $page: Int!, $pageSize: Int!) { "
+    "query EmployerReviewsData($employerId: Int!, $page: Int!, $pageSize: Int!, $sort: ReviewsSortOrderEnum, $language: String, $applyDefaultCriteria: Boolean, $employmentStatuses: [EmploymentStatusEnum], $location: LocationIdent, $onlyCurrentEmployees: Boolean) { "
     "  employerReviews: employerReviewsRG(employerReviewsInput: { "
     "    employer: { id: $employerId } "
+    "    employmentStatuses: $employmentStatuses "
+    "    location: $location "
+    "    sort: $sort "
     "    page: { num: $page size: $pageSize } "
+    "    applyDefaultCriteria: $applyDefaultCriteria "
+    "    onlyCurrentEmployees: $onlyCurrentEmployees "
     "    worldwideFilter: true "
+    "    useRowProfileTldForRatings: false "
+    "    language: $language "
     "  }) { filteredReviewsCount numberOfPages "
     "    reviews { "
     "      reviewId featured reviewDateTime summary isCurrentJob "
@@ -171,6 +178,12 @@ def fetch_page(employer_id: int, page: int) -> tuple[int, dict]:
         "operationName": "EmployerReviewsData",
         "variables": {
             "employerId": employer_id, "page": page, "pageSize": PAGE_SIZE,
+            "sort": "RELEVANCE",
+            "language": "eng",
+            "applyDefaultCriteria": True,
+            "employmentStatuses": ["REGULAR", "PART_TIME"],
+            "location": {},
+            "onlyCurrentEmployees": False,
         },
         "query": REVIEWS_QUERY,
     }
@@ -586,6 +599,7 @@ def main():
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
     )
+
     c = ParallelCollector()
 
     conn = get_conn()

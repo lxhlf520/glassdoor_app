@@ -42,7 +42,7 @@ SEARCH_COMPANIES_QUERY = (
 )
 
 REVIEWS_QUERY = (
-    "query EmployerReviewsData($employerId: Int!, $page: Int!, $pageSize: Int!) { "
+    "query EmployerReviewsData($employerId: Int!, $page: Int!, $pageSize: Int!, $sort: ReviewsSortOrderEnum, $language: String, $applyDefaultCriteria: Boolean, $employmentStatuses: [EmploymentStatusEnum], $location: LocationIdent, $onlyCurrentEmployees: Boolean) { "
     "  employer(id: $employerId) { primaryIndustryId name shortName } "
     "  reviewLocationsRG(employer: { id: $employerId } ) "
     "    { locations { id name type children { id name type "
@@ -50,8 +50,15 @@ REVIEWS_QUERY = (
     "    children { id name type } } } } } }  "
     "  employerReviews: employerReviewsRG(employerReviewsInput: { "
     "    employer: { id: $employerId }  "
+    "    employmentStatuses: $employmentStatuses "
+    "    location: $location "
+    "    sort: $sort "
     "    page: { num: $page size: $pageSize }  "
+    "    applyDefaultCriteria: $applyDefaultCriteria "
+    "    onlyCurrentEmployees: $onlyCurrentEmployees "
     "    worldwideFilter: true "
+    "    useRowProfileTldForRatings: false "
+    "    language: $language "
     "  }) { filteredReviewsCount numberOfPages "
     "    reviews { "
     "      reviewId featured reviewDateTime summary isCurrentJob "
@@ -160,6 +167,12 @@ class GlassdoorCollector:
                     "employerId": employer_id,
                     "page": page,
                     "pageSize": PAGE_SIZE,
+                    "sort": "RELEVANCE",
+                    "language": "eng",
+                    "applyDefaultCriteria": True,
+                    "employmentStatuses": ["REGULAR", "PART_TIME"],
+                    "location": {},
+                    "onlyCurrentEmployees": False,
                 },
                 "query": REVIEWS_QUERY,
                 "extensions": {
@@ -409,6 +422,12 @@ class GlassdoorCollector:
                     "variables": {
                         "employerId": eid,
                         "page": 1, "pageSize": 1,
+                        "sort": "RELEVANCE",
+                        "language": "eng",
+                        "applyDefaultCriteria": True,
+                        "employmentStatuses": ["REGULAR", "PART_TIME"],
+                        "location": {},
+                        "onlyCurrentEmployees": False,
                     },
                     "query": REVIEWS_QUERY,
                     "extensions": {
@@ -460,6 +479,12 @@ class GlassdoorCollector:
                     "variables": {
                         "employerId": eid,
                         "page": 1, "pageSize": PAGE_SIZE,
+                        "sort": "RELEVANCE",
+                        "language": "eng",
+                        "applyDefaultCriteria": True,
+                        "employmentStatuses": ["REGULAR", "PART_TIME"],
+                        "location": {},
+                        "onlyCurrentEmployees": False,
                     },
                     "query": REVIEWS_QUERY,
                     "extensions": {

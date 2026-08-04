@@ -22,7 +22,6 @@ from .config import (
     ROTATE_AFTER,
     TUNNEL_PROXY_URL,
 )
-
 log = logging.getLogger("collector.infra")
 
 # 隧道代理模式：跳过 Clash 节点轮换

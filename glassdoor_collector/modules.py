@@ -770,7 +770,7 @@ class BenefitsCollector(BaseModuleCollector):
     progress_table = "benefits_progress"
     columns = BENEFIT_COLUMNS
     doc_to_row = staticmethod(_benefit_doc_to_row)
-    page_size = 20
+    page_size = 10000
     operation = "EmployerBenefits"
     id_field_name = "benefitReviewId"
 
@@ -1001,7 +1001,7 @@ class InterviewsCollector(BaseModuleCollector):
     progress_table = "interviews_progress"
     columns = INTERVIEW_COLUMNS
     doc_to_row = staticmethod(_interview_doc_to_row)
-    page_size = 50
+    page_size = 5000
     operation = "EmployerInterviewsList"
     id_field_name = "interviewId"
 
@@ -1075,7 +1075,7 @@ class JobsCollector(BaseModuleCollector):
     progress_table = "jobs_progress"
     columns = JOB_COLUMNS
     doc_to_row = staticmethod(_job_doc_to_row)
-    page_size = 30
+    page_size = 100
     operation = "JobsSearchAndroid"
     id_field_name = "listingId"
     max_no_new_pages = 8
@@ -1101,6 +1101,7 @@ class JobsCollector(BaseModuleCollector):
                          "values": str(employer_id)}
                     ],
                     "pageNumber": page,
+                    "numPerPage": self.page_size,
                 },
             },
             "query": JOBS_QUERY,
