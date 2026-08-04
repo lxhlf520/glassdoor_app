@@ -323,3 +323,16 @@ def fetch_graphql(operation: str, body: dict, timeout: int = 60) -> tuple[int, d
         log.warning("req error op=%s: %s", operation, str(e)[:100])
         return 0, {}
 
+
+def invalidate_session(fp: str):
+    """关闭指定指纹的 session。下次 get_session 时会重建，
+    从而强制通过隧道代理建立新的 TCP 连接。"""
+    with _sessions_lock:
+        if fp in _sessions:
+            try:
+                _sessions[fp].close()
+            except Exception:
+                pass
+            del _sessions[fp]
+            log.debug("Session invalidated for fp=%s", fp)
+

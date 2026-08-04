@@ -17,6 +17,7 @@ from typing import Any
 
 from .infra import (
     fp_rotator, rate_limiter, rotator, fetch_graphql,
+    invalidate_session,
 )
 
 from .config import (
@@ -31,34 +32,25 @@ from .config import (
 from .db import get_conn, init_all_tables, put_conn
 
 REVIEWS_QUERY = (
-    "query EmployerReviewsData($employerId: Int!, $page: Int!, $pageSize: Int!, "
-    "$sort: ReviewsSortOrderEnum, $jobTitle: JobTitleIdent, $language: String, "
-    "$applyDefaultCriteria: Boolean, $bestProfileId: Int, "
-    "$employmentStatuses: [EmploymentStatusEnum], $gocId: GOCIdent, "
-    "$location: LocationIdent, $onlyCurrentEmployees: Boolean) { "
+    "query EmployerReviewsData($employerId: Int!, $page: Int!, $pageSize: Int!) { "
     "  employerReviews: employerReviewsRG(employerReviewsInput: { "
     "    employer: { id: $employerId } "
-    "    employmentStatuses: $employmentStatuses goc: $gocId "
-    "    location: $location sort: $sort "
     "    page: { num: $page size: $pageSize } "
-    "    applyDefaultCriteria: $applyDefaultCriteria "
-    "    jobTitle: $jobTitle onlyCurrentEmployees: $onlyCurrentEmployees "
-    "    worldwideFilter: true dynamicProfileId: $bestProfileId "
-    "    useRowProfileTldForRatings: false language: $language "
+    "    worldwideFilter: true "
     "  }) { filteredReviewsCount numberOfPages "
-    "    reviews { __typename ...EmployerReviewListFragment } "
-    "}  "
-    "fragment EmployerReviewListFragment on EmployerReviewRG { "
-    "  reviewId featured reviewDateTime summary isCurrentJob "
-    "  lengthOfEmployment location { id name type } "
-    "  ratingOverall ratingRecommendToFriend ratingCeo "
-    "  ratingBusinessOutlook ratingCareerOpportunities "
-    "  ratingCompensationAndBenefits ratingCultureAndValues "
-    "  ratingDiversityAndInclusion ratingSeniorLeadership "
-    "  ratingWorkLifeBalance pros cons advice countHelpful "
-    "  hasEmployerResponse employer { id shortName squareLogoUrl } "
-    "  employerResponses { responseDateTime response } "
-    "  jobTitle { text } "
+    "    reviews { "
+    "      reviewId featured reviewDateTime summary isCurrentJob "
+    "      lengthOfEmployment location { id name type } "
+    "      ratingOverall ratingRecommendToFriend ratingCeo "
+    "      ratingBusinessOutlook ratingCareerOpportunities "
+    "      ratingCompensationAndBenefits ratingCultureAndValues "
+    "      ratingDiversityAndInclusion ratingSeniorLeadership "
+    "      ratingWorkLifeBalance pros cons advice countHelpful "
+    "      hasEmployerResponse employer { id shortName squareLogoUrl } "
+    "      employerResponses { responseDateTime response } "
+    "      jobTitle { text } "
+    "    } "
+    "  } "
     "}"
 )
 
@@ -70,15 +62,30 @@ _stats = {"req_ok": 0, "req_fail": 0, "reviews": 0, "pages": 0,
           "employers_done": 0, "start": time.time()}
 _error_streak = {"n": 0, "lock": threading.Lock()}
 
+# 全局失败追踪 · 冷却机制：连续失败超阈值时暂停所有请求，让隧道代理恢复
+_consecutive_fails = 0
+_cooldown_until = 0.0
+_fail_lock = threading.Lock()
+
 
 def _note_error():
+    """记录一次失败。触发冷却：全局连续 ≥3 或本 worker 连续 ≥5。"""
+    global _consecutive_fails
     with _error_streak["lock"]:
         _error_streak["n"] += 1
+        ws = _error_streak["n"]
+    with _fail_lock:
+        _consecutive_fails += 1
+        return _consecutive_fails >= 3 or ws >= 5
 
 
 def _note_ok():
+    """记录一次成功，重置新旧两个计数器。"""
+    global _consecutive_fails
     with _error_streak["lock"]:
         _error_streak["n"] = 0
+    with _fail_lock:
+        _consecutive_fails = max(0, _consecutive_fails - 1)
 
 
 def _adaptive_sleep():
@@ -90,6 +97,23 @@ def _adaptive_sleep():
         time.sleep(10)
     elif n >= 5:
         time.sleep(3)
+
+
+def _trigger_cooldown():
+    """触发全局冷却。时长随连续失败次数递增：15s → 30s → 60s → ... → 300s。"""
+    global _cooldown_until, _consecutive_fails
+    with _fail_lock:
+        with _error_streak["lock"]:
+            ws = _error_streak["n"]
+        levels = [15, 30, 60, 120, 300]
+        idx = min(max(_consecutive_fails, ws) - 3, len(levels) - 1)
+        idx = max(0, idx)
+        duration = levels[idx]
+        _cooldown_until = max(_cooldown_until, time.time() + duration)
+    log.warning("Proxy degraded (global=%d worker=%d fails), cooldown %.0fs",
+                _consecutive_fails, ws, duration)
+    # 销毁所有 session，冷却后重建 TCP 连接
+    invalidate_session(fp_rotator.current)
 
 
 # ---------------------------------------------------------------------------
@@ -147,10 +171,6 @@ def fetch_page(employer_id: int, page: int) -> tuple[int, dict]:
         "operationName": "EmployerReviewsData",
         "variables": {
             "employerId": employer_id, "page": page, "pageSize": PAGE_SIZE,
-            "sort": "RELEVANCE", "language": "eng",
-            "applyDefaultCriteria": True,
-            "employmentStatuses": ["REGULAR", "PART_TIME"],
-            "location": {}, "onlyCurrentEmployees": False,
         },
         "query": REVIEWS_QUERY,
     }
@@ -324,6 +344,12 @@ class ParallelCollector:
                     return
                 continue
             eid, ename, page, retries = task
+            # 全局冷却等待
+            with _fail_lock:
+                wait = _cooldown_until - time.time()
+            if wait > 0:
+                log.info("[w%d] Cooldown: waiting %.0fs...", wid, wait)
+                time.sleep(wait)
             _adaptive_sleep()
             rate_limiter.acquire()
             rate_limiter.maybe_ramp_up()
@@ -335,7 +361,8 @@ class ParallelCollector:
                 self.q.task_done()
                 continue
             if status != 200:
-                _note_error()
+                if _note_error():
+                    _trigger_cooldown()
                 if retries < MAX_PAGE_RETRIES:
                     self.q.put((eid, ename, page, retries + 1))
                 else:
@@ -349,6 +376,24 @@ class ParallelCollector:
             with _stats_lock:
                 _stats["req_ok"] += 1
                 _stats["pages"] += 1
+
+            # 200 但响应包含 errors（如 "Server error"），按失败重试处理
+            if data.get("errors"):
+                err_msg = data["errors"][0].get("message", "unknown") if data["errors"] else "unknown"
+                log.warning("[w%d] API error eid=%s p%d: %s", wid, eid, page, err_msg)
+                if _note_error():
+                    _trigger_cooldown()
+                if retries < MAX_PAGE_RETRIES:
+                    self.q.put((eid, ename, page, retries + 1))
+                else:
+                    log.warning("[w%d] page giveup (API error) eid=%s p%d", wid, eid, page)
+                    self._mark_page_failed(eid, page)
+                with _stats_lock:
+                    _stats["req_fail"] += 1
+                    _stats["req_ok"] -= 1
+                    _stats["pages"] -= 1
+                self.q.task_done()
+                continue
 
             er = (data.get("data") or {}).get("employerReviews") or {}
             reviews = er.get("reviews") or []

@@ -24,6 +24,7 @@ from typing import Any, Callable
 
 from .infra import (
     fetch_graphql, fp_rotator, rate_limiter, rotator,
+    invalidate_session,
 )
 
 from .config import (
@@ -214,10 +215,66 @@ def transform_job(jv: dict, employer_id: int, employer_name: str,
 # ---------------------------------------------------------------------------
 # 通用请求封装
 # ---------------------------------------------------------------------------
+# 全局失败追踪 · 冷却机制：连续失败超阈值时暂停所有请求，让隧道代理恢复
+# 两层触发：全局连续失败 ≥3 次，或当前线程连续失败 ≥5 次
+_consecutive_fails = 0
+_cooldown_until = 0.0
+_fail_lock = threading.Lock()
+_thread_local = threading.local()
+
+
+def _thread_streak() -> int:
+    """当前线程连续失败次数。"""
+    if not hasattr(_thread_local, 'fail_streak'):
+        _thread_local.fail_streak = 0
+    return _thread_local.fail_streak
+
+
+def _note_fail() -> bool:
+    """记录一次失败，返回 True 表示需要触发冷却。
+    触发条件：全局连续 ≥3 次，或本线程连续 ≥5 次。"""
+    global _consecutive_fails
+    ts = _thread_streak() + 1
+    _thread_local.fail_streak = ts
+    with _fail_lock:
+        _consecutive_fails += 1
+        return _consecutive_fails >= 3 or ts >= 5
+
+
+def _note_ok():
+    """记录一次成功，重置本线程 + 逐步降低全局失败计数。"""
+    global _consecutive_fails
+    _thread_local.fail_streak = 0
+    with _fail_lock:
+        _consecutive_fails = max(0, _consecutive_fails - 1)
+
+
+def _trigger_cooldown():
+    """触发全局冷却。时长随连续失败次数递增：15s → 30s → 60s → ... → 300s。"""
+    global _cooldown_until, _consecutive_fails
+    with _fail_lock:
+        levels = [15, 30, 60, 120, 300]
+        idx = min(max(_consecutive_fails, _thread_streak()) - 3, len(levels) - 1)
+        idx = max(0, idx)
+        duration = levels[idx]
+        _cooldown_until = max(_cooldown_until, time.time() + duration)
+    log.warning("Proxy degraded (global=%d thread=%d fails), cooldown %.0fs",
+                _consecutive_fails, _thread_streak(), duration)
+    # 销毁所有 session，冷却后重建 TCP 连接
+    from .infra import fp_rotator as _fpr
+    invalidate_session(_fpr.current)
+
 def fetch_module_page(operation: str, body: dict, employer_id: int,
                       retries: int = MAX_PAGE_RETRIES) -> tuple[int, dict]:
     """返回 (status, data)。status 含义与 fetch_graphql 一致。"""
     for attempt in range(retries + 1):
+        # 冷却期等待
+        with _fail_lock:
+            wait = _cooldown_until - time.time()
+        if wait > 0:
+            log.info("Cooldown: waiting %.0fs before next request...", wait)
+            time.sleep(wait + random.random() * 0.5)
+
         rate_limiter.acquire()
         rate_limiter.maybe_ramp_up()
         # 请求前随机抖动 0-300ms，分散并发连接，减轻隧道代理压力
@@ -226,6 +283,7 @@ def fetch_module_page(operation: str, body: dict, employer_id: int,
         if status == 200:
             with _stats_lock:
                 _stats["req_ok"] += 1
+            _note_ok()
             return 200, data
         with _stats_lock:
             _stats["req_fail"] += 1
@@ -234,6 +292,8 @@ def fetch_module_page(operation: str, body: dict, employer_id: int,
             return -1, {}
         log.warning("retry op=%s eid=%s attempt=%d status=%s",
                     operation, employer_id, attempt, status)
+        if _note_fail():
+            _trigger_cooldown()
         if attempt < retries:
             # jitter 打散重试风暴：避免所有 worker 同步重试
             time.sleep(min(2 ** attempt, 30) + random.random() * 0.5)
@@ -683,9 +743,22 @@ class BaseModuleCollector:
 
         with _stats_lock:
             cur = dict(_stats)
-        log.info("=== %s DONE === req=%d fail=%d docs=%d employers=%d",
+        # 从 DB 统计真实完成数，不依赖内存计数器
+        conn = get_conn()
+        try:
+            with conn.cursor() as cr:
+                cr.execute(
+                    f"SELECT status, COUNT(*) FROM {self.progress_table} GROUP BY 1")
+                done_counts = dict(cr.fetchall())
+        finally:
+            put_conn(conn)
+        log.info("=== %s DONE === req=%d fail=%d docs=%d | "
+                 "progress: done=%d error=%d in_progress=%d",
                  self.name.upper(), cur["req_ok"], cur["req_fail"],
-                 cur["docs"], cur["employers_done"])
+                 cur["docs"],
+                 done_counts.get("done", 0) + done_counts.get("done_empty", 0),
+                 done_counts.get("error", 0),
+                 done_counts.get("in_progress", 0))
 
 
 # ---------------------------------------------------------------------------
@@ -729,6 +802,20 @@ class BenefitsCollector(BaseModuleCollector):
             },
             "query": BENEFITS_QUERY,
         }
+
+    def _list_countries(self, employer_id: int) -> tuple[list[dict], dict] | None:
+        """获取该雇主所有可用国家列表及 US page1 数据。
+        返回的国家按 country_id 升序排列（主要国家靠前: US=1, UK=2, CA=3 ...）。"""
+        body = self._make_body(employer_id, 1, 1)
+        status, data = fetch_module_page(self.operation, body, employer_id)
+        if status != 200:
+            return None
+        countries = ((data.get("data") or {}).get(
+            "countriesForEmployerBenefits") or [])
+        result = [{"id": c.get("id"), "name": c.get("name", "")}
+                  for c in countries if c.get("id")]
+        result.sort(key=lambda x: x["id"])
+        return result, data
 
     def _probe_country(self, employer_id: int) -> tuple[int, dict] | None:
         """先尝试美国（countryId=1），无数据则遍历公司支持的其他国家。"""
@@ -777,49 +864,22 @@ class BenefitsCollector(BaseModuleCollector):
             "collectedAt": datetime.now(timezone.utc),
         }
 
-    def collect_employer(self, task: dict,
-                         add_doc: Callable[[dict], None]) -> str:
-        eid = task["employerId"]
-        ename = task["employerName"]
-        start_page = task.get("startPage", 1)
-        ctx = task.get("ctx", {})
-        country_id = ctx.get("countryId")
-        first_data: dict | None = None
-
-        if start_page == 1 and country_id is None:
-            probe = self._probe_country(eid)
-            if probe is None:
-                self._mark_done(eid, "done_empty")
-                return "done_empty"
-            country_id, first_data = probe
-            self._init_progress(eid, ename, total_pages=None,
-                                ctx={"countryId": country_id})
-        else:
-            country_id = country_id or 1
-            conn = get_conn()
-            try:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        f"SELECT 1 FROM {self.progress_table} WHERE employer_id = %s",
-                        (eid,))
-                    if cur.fetchone() is None:
-                        self._init_progress(eid, ename, total_pages=None,
-                                            ctx={"countryId": country_id})
-            finally:
-                put_conn(conn)
-
+    def _collect_one_country(self, eid: int, ename: str, country_id: int,
+                             first_data: dict | None, add_doc: Callable[[dict], None],
+                             start_page: int = 1) -> tuple[str, int]:
+        """采集一个国家。返回 (status, last_page)。"""
         page = start_page
+        has_data = False
+
         while page <= MAX_PAGES_PER_EMPLOYER:
-            if first_data is not None:
+            if first_data is not None and page == start_page:
                 data = first_data
                 first_data = None
             else:
                 body = self._make_body(eid, country_id, page)
-                status, data = fetch_module_page(
-                    self.operation, body, eid)
+                status, data = fetch_module_page(self.operation, body, eid)
                 if status != 200:
-                    self._mark_error(eid, page)
-                    return "error"
+                    return "error", page
 
             overview = ((data.get("data") or {}).get(
                 "benefitsOverviewForCountry") or {})
@@ -831,8 +891,8 @@ class BenefitsCollector(BaseModuleCollector):
             if page == 1:
                 add_doc(self._overview_doc(overview, eid, ename, country_id))
                 if not reviews and not overview.get("totalBenefitReviews"):
-                    self._mark_done(eid, "done_empty")
-                    return "done_empty"
+                    return "empty", page
+                has_data = True
 
             for r in reviews:
                 doc = transform_benefit_review(r, eid, ename, country_id)
@@ -843,6 +903,90 @@ class BenefitsCollector(BaseModuleCollector):
             if len(reviews) < self.page_size:
                 break
             page += 1
+
+        return "done", page
+
+    def collect_employer(self, task: dict,
+                         add_doc: Callable[[dict], None]) -> str:
+        eid = task["employerId"]
+        ename = task["employerName"]
+        start_page = task.get("startPage", 1)
+        ctx = task.get("ctx", {})
+        country_id = ctx.get("countryId")
+
+        # ── 首次: 获取所有国家列表 ──
+        if start_page == 1 and country_id is None:
+            result = self._list_countries(eid)
+            if result is None:
+                self._mark_done(eid, "error")
+                return "error"
+            all_countries, first_data = result
+            if not all_countries:
+                self._mark_done(eid, "done_empty")
+                return "done_empty"
+            # 从第一个国家开始（通常是 US）
+            country_id = all_countries[0]["id"]
+            ctx = {"countryId": country_id, "all_countries": all_countries,
+                   "next_idx": 0}
+            self._init_progress(eid, ename, total_pages=None, ctx=ctx)
+            result, last_page = self._collect_one_country(
+                eid, ename, country_id, first_data, add_doc)
+        else:
+            # ── 续传 / 后续国家 ──
+            country_id = country_id or 1
+            all_countries = ctx.get("all_countries", [])
+            if not all_countries:
+                # 旧版 progress 没有 all_countries，走单国回退
+                result, last_page = self._collect_one_country(
+                    eid, ename, country_id, None, add_doc, start_page)
+                if result == "error":
+                    self._mark_error(eid, last_page)
+                    return "error"
+                self._mark_done(eid, "done" if result == "done" else "done_empty")
+                return result
+
+            start_idx = ctx.get("next_idx", 0)
+            result, last_page = self._collect_one_country(
+                eid, ename, country_id, None, add_doc, start_page)
+            if result == "error":
+                self._mark_error(eid, last_page)
+                return "error"
+            # 更新进度到下一个国家
+            next_idx = start_idx + 1
+            ctx["next_idx"] = next_idx
+
+        # ── 错误处理 ──
+        if result == "error":
+            self._mark_error(eid, last_page)
+            return "error"
+
+        # ── 遍历剩余国家 ──
+        next_idx = ctx.get("next_idx", 0)
+        for idx in range(next_idx, len(all_countries)):
+            c = all_countries[idx]
+            cid = c["id"]
+            if cid == country_id and idx == next_idx:
+                continue  # 第一个国家已处理
+
+            ctx["countryId"] = cid
+            ctx["next_idx"] = idx
+            # 保存进度并将 next_page 重置为 1，确保中断后续传从该国家的 page1 开始
+            conn = get_conn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"UPDATE {self.progress_table} SET next_page = 1,"
+                        f" ctx = %s, updated_at = %s WHERE employer_id = %s",
+                        (json.dumps(ctx), datetime.now(timezone.utc), eid))
+                    conn.commit()
+            finally:
+                put_conn(conn)
+
+            result, last_page = self._collect_one_country(
+                eid, ename, cid, None, add_doc)
+            if result == "error":
+                self._mark_error(eid, last_page)
+                return "error"
 
         self._mark_done(eid, "done")
         return "done"

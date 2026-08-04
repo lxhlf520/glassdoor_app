@@ -42,43 +42,31 @@ SEARCH_COMPANIES_QUERY = (
 )
 
 REVIEWS_QUERY = (
-    "query EmployerReviewsData($employerId: Int!, $page: Int!, $pageSize: Int!, "
-    "$sort: ReviewsSortOrderEnum, $jobTitle: JobTitleIdent, $language: String, "
-    "$applyDefaultCriteria: Boolean, $bestProfileId: Int, "
-    "$employmentStatuses: [EmploymentStatusEnum], $gocId: GOCIdent, "
-    "$location: LocationIdent, $onlyCurrentEmployees: Boolean) { "
+    "query EmployerReviewsData($employerId: Int!, $page: Int!, $pageSize: Int!) { "
     "  employer(id: $employerId) { primaryIndustryId name shortName } "
     "  reviewLocationsRG(employer: { id: $employerId } ) "
-    "    { __typename ...EmployerReviewLocationsFragment } "
-    "  employerReviews: employerReviewsRG(employerReviewsInput: { "
-    "    employer: { id: $employerId }  "
-    "    employmentStatuses: $employmentStatuses goc: $gocId "
-    "    location: $location sort: $sort "
-    "    page: { num: $page size: $pageSize }  "
-    "    applyDefaultCriteria: $applyDefaultCriteria "
-    "    jobTitle: $jobTitle onlyCurrentEmployees: $onlyCurrentEmployees "
-    "    worldwideFilter: true dynamicProfileId: $bestProfileId "
-    "    useRowProfileTldForRatings: false language: $language "
-    "  }) { filteredReviewsCount numberOfPages "
-    "    reviews { __typename ...EmployerReviewListFragment } "
-    "    queryJobTitle { mgocId } "
-    "  } "
-    "}  "
-    "fragment EmployerReviewLocationsFragment on ReviewLocationsRGResponse { "
-    "  locations { id name type children { id name type "
+    "    { locations { id name type children { id name type "
     "    children { id name type children { id name type "
     "    children { id name type } } } } } }  "
-    "fragment EmployerReviewListFragment on EmployerReviewRG { "
-    "  reviewId featured reviewDateTime summary isCurrentJob "
-    "  lengthOfEmployment location { id name type } "
-    "  ratingOverall ratingRecommendToFriend ratingCeo "
-    "  ratingBusinessOutlook ratingCareerOpportunities "
-    "  ratingCompensationAndBenefits ratingCultureAndValues "
-    "  ratingDiversityAndInclusion ratingSeniorLeadership "
-    "  ratingWorkLifeBalance pros cons advice countHelpful "
-    "  hasEmployerResponse employer { id shortName squareLogoUrl } "
-    "  employerResponses { responseDateTime response } "
-    "  jobTitle { text } "
+    "  employerReviews: employerReviewsRG(employerReviewsInput: { "
+    "    employer: { id: $employerId }  "
+    "    page: { num: $page size: $pageSize }  "
+    "    worldwideFilter: true "
+    "  }) { filteredReviewsCount numberOfPages "
+    "    reviews { "
+    "      reviewId featured reviewDateTime summary isCurrentJob "
+    "      lengthOfEmployment location { id name type } "
+    "      ratingOverall ratingRecommendToFriend ratingCeo "
+    "      ratingBusinessOutlook ratingCareerOpportunities "
+    "      ratingCompensationAndBenefits ratingCultureAndValues "
+    "      ratingDiversityAndInclusion ratingSeniorLeadership "
+    "      ratingWorkLifeBalance pros cons advice countHelpful "
+    "      hasEmployerResponse employer { id shortName squareLogoUrl } "
+    "      employerResponses { responseDateTime response } "
+    "      jobTitle { text } "
+    "    } "
+    "    queryJobTitle { mgocId } "
+    "  } "
     "}"
 )
 
@@ -172,12 +160,6 @@ class GlassdoorCollector:
                     "employerId": employer_id,
                     "page": page,
                     "pageSize": PAGE_SIZE,
-                    "sort": "RELEVANCE",
-                    "language": "eng",
-                    "applyDefaultCriteria": True,
-                    "employmentStatuses": ["REGULAR", "PART_TIME"],
-                    "location": {},
-                    "onlyCurrentEmployees": False,
                 },
                 "query": REVIEWS_QUERY,
                 "extensions": {
@@ -427,10 +409,6 @@ class GlassdoorCollector:
                     "variables": {
                         "employerId": eid,
                         "page": 1, "pageSize": 1,
-                        "sort": "RELEVANCE", "language": "eng",
-                        "applyDefaultCriteria": True,
-                        "employmentStatuses": ["REGULAR", "PART_TIME"],
-                        "location": {}, "onlyCurrentEmployees": False,
                     },
                     "query": REVIEWS_QUERY,
                     "extensions": {
@@ -482,10 +460,6 @@ class GlassdoorCollector:
                     "variables": {
                         "employerId": eid,
                         "page": 1, "pageSize": PAGE_SIZE,
-                        "sort": "RELEVANCE", "language": "eng",
-                        "applyDefaultCriteria": True,
-                        "employmentStatuses": ["REGULAR", "PART_TIME"],
-                        "location": {}, "onlyCurrentEmployees": False,
                     },
                     "query": REVIEWS_QUERY,
                     "extensions": {
