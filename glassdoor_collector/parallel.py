@@ -141,6 +141,22 @@ REVIEW_COLUMNS = (
 )
 
 
+def _rating_to_float(val):
+    """Convert Glassdoor enum rating strings (POSITIVE/NEGATIVE/APPROVE) to float 0-1."""
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    s = str(val).upper()
+    if s in ("POSITIVE", "APPROVE"):
+        return 1.0
+    if s in ("NEGATIVE", "DISAPPROVE"):
+        return 0.0
+    if s == "NO_OPINION":
+        return -1.0
+    return None
+
+
 def _review_doc_to_row(doc: dict) -> tuple:
     return (
         doc["reviewId"],
@@ -155,9 +171,9 @@ def _review_doc_to_row(doc: dict) -> tuple:
         doc.get("locationId"),
         doc.get("locationName"),
         doc.get("ratingOverall"),
-        doc.get("ratingRecommendToFriend"),
-        doc.get("ratingCeo"),
-        doc.get("ratingBusinessOutlook"),
+        _rating_to_float(doc.get("ratingRecommendToFriend")),
+        _rating_to_float(doc.get("ratingCeo")),
+        _rating_to_float(doc.get("ratingBusinessOutlook")),
         doc.get("ratingCareerOpportunities"),
         doc.get("ratingCompensationAndBenefits"),
         doc.get("ratingCultureAndValues"),
