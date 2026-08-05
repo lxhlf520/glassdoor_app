@@ -603,14 +603,21 @@ class ParallelCollector:
                  cur["req_ok"], cur["req_fail"], cur["reviews"],
                  cur["employers_done"])
 
-        conn = get_conn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT COUNT(*) FROM reviews")
-                total = cur.fetchone()[0]
-            log.info("DB reviews total: %d", total)
-        finally:
-            put_conn(conn)
+        # 汇总查询：重试以应对池连接闲置超时被 PG 断开
+        for attempt in range(3):
+            conn = get_conn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT COUNT(*) FROM reviews")
+                    total = cur.fetchone()[0]
+                log.info("DB reviews total: %d", total)
+                break
+            except Exception:
+                time.sleep(0.5)
+            finally:
+                put_conn(conn)
+        else:
+            log.info("DB reviews total: (query failed, data intact)")
 
 
 def main():
